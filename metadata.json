@@ -1,0 +1,6 @@
+{
+  "name": "Puro Farms dMRV",
+  "description": "",
+  "requestFramePermissions": ["camera", "geolocation"],
+  "majorCapabilities": []
+}
