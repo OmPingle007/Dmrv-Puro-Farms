@@ -373,16 +373,81 @@ router.post("/flags/:id/resolve", authenticate(["MANAGEMENT", "AUDITOR"]), (req,
 router.get("/dashboard", authenticate(["MANAGEMENT"]), (req, res) => {
   const corcsTotal = db.prepare("SELECT SUM(corcs_net) as t FROM carbon_calculations").get() as any;
   const activeFlags = db.prepare("SELECT COUNT(*) as c FROM flags WHERE status = 'OPEN'").get() as any;
-  const flaggedBatches = db.prepare("SELECT * FROM flags WHERE status = 'OPEN' ORDER BY id DESC").all();
+  const flaggedBatches = db.prepare("SELECT * FROM flags WHERE status = 'OPEN' ORDER BY id DESC").all() as any[];
   const expiringCerts = db.prepare("SELECT * FROM calibration_certs WHERE status = 'VALID' OR status = 'EXPIRING'").all();
   const dispatches = db.prepare("SELECT SUM(dispatch_weight_t) as t FROM dispatches").get() as any;
-  const batches = db.prepare("SELECT b.*, c.corcs_net FROM batches b LEFT JOIN carbon_calculations c ON b.batch_id_label = c.batch_id_label ORDER BY id DESC").all();
+  const batches = db.prepare("SELECT b.*, c.corcs_net FROM batches b LEFT JOIN carbon_calculations c ON b.batch_id_label = c.batch_id_label ORDER BY id DESC").all() as any[];
+
+  // 1. Funnel
+  const funnel = {
+    productionComplete: batches.filter(b => b.status === 'PRODUCTION_COMPLETE').length,
+    sampleSealed: batches.filter(b => b.status === 'SAMPLE_SEALED').length,
+    dispatched: batches.filter(b => b.status === 'DISPATCHED').length,
+    carbonCalculated: batches.filter(b => !!b.corcs_net).length,
+    auditReady: batches.filter(b => !!b.corcs_net && b.status === 'DISPATCHED').length,
+  };
+
+  // 2. Monthly Trend (last 7 months)
+  const now = new Date();
+  const months = [];
+  for (let i = 6; i >= 0; i--) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    const monthLabel = d.toLocaleString('default', { month: 'short' });
+    const monthYear = d.toISOString().slice(0, 7); // YYYY-MM
+    
+    // Confirmed: has corcs_net and month matches created_at or updated_at
+    // For simplicity, let's look at batches created in that month
+    const monthBatches = batches.filter(b => b.created_at_utc.startsWith(monthYear));
+    const confirmed = monthBatches.reduce((acc, b) => acc + (b.corcs_net || 0), 0);
+    // Pending: if in relevant states but no corcs_net yet
+    const pending = monthBatches.filter(b => !b.corcs_net && ['PRODUCTION_COMPLETE', 'SAMPLE_SEALED', 'DISPATCHED'].includes(b.status))
+                   .reduce((acc, b) => acc + (b.qbiochar_dry ? b.qbiochar_dry * 0.4 : 0), 0); // Estimated 0.4 CORCs per tonne if pending
+
+    months.push({ name: monthLabel, confirmed, pending });
+  }
+
+  // 3. Lab Periods
+  const labPeriods = [];
+  for (let i = 3; i >= 0; i--) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    const periodName = d.toLocaleString('default', { month: 'long', year: 'numeric' });
+    const monthYear = d.toISOString().slice(0, 7);
+    const pBatches = batches.filter(b => b.created_at_utc.startsWith(monthYear));
+    
+    if (pBatches.length > 0) {
+      const coaCount = db.prepare(`SELECT COUNT(*) as c FROM coa_records WHERE batch_id_label IN (SELECT batch_id_label FROM batches WHERE created_at_utc LIKE '${monthYear}%')`).get() as any;
+      const status = coaCount.c >= pBatches.length ? 'COMPLETE' : 'PENDING';
+      const daysOpen = status === 'COMPLETE' ? 0 : Math.floor((now.getTime() - d.getTime()) / (1000 * 60 * 60 * 24));
+      labPeriods.push({ name: periodName, batchCount: pBatches.length, daysOpen, status });
+    }
+  }
+
+  // 4. Detailed Flags
+  const flags = flaggedBatches.map(f => ({
+    ...f,
+    blocksDispatch: f.rule_id.startsWith('VE-'), // Assuming VE rules are blocking
+    description: f.rule_id === 'VE-02' ? 'Yield ratio anomaly detected.' :
+                 f.rule_id === 'VE-03' ? 'Missing PLC telemetry logs.' :
+                 f.rule_id === 'VE-05' ? 'GPS spoofing suspected in delivery.' :
+                 f.rule_id === 'VE-11' ? 'Dispatch mass exceeding batch production.' :
+                 f.rule_id === 'VE-14' ? 'Seal photo GPS out of range.' :
+                 'Integrity violation flagged by engine.'
+  }));
+
+  // 5. Revenue
+  const confirmedRev = (corcsTotal?.t || 0) * 120;
+  const pipelineRev = batches.filter(b => !b.corcs_net && b.qbiochar_dry > 0)
+                             .reduce((acc, b) => acc + (b.qbiochar_dry * 0.4 * 110), 0); // $110 for pipeline est
 
   res.json({
     corcsTotal: corcsTotal?.t || 0,
     activeFlags: activeFlags?.c || 0,
-    flaggedBatches: flaggedBatches || [],
     dispatchesTotal: dispatches?.t || 0,
+    revenue: { confirmed: confirmedRev, pipeline: pipelineRev },
+    funnel,
+    trend: months,
+    labPeriods,
+    flags,
     batches: batches || [],
     expiringCerts: expiringCerts || []
   });
