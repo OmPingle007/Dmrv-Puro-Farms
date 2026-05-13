@@ -8,13 +8,14 @@ type TabType = 'All' | 'OPEN' | 'PRODUCTION_COMPLETE' | 'SAMPLE_SEALED' | 'CARBO
 
 export default function PlantOperator() {
   const [batches, setBatches] = useState<any[]>([]);
+  const [deliveries, setDeliveries] = useState<any[]>([]);
   const [msg, setMsg] = useState("");
   const [activeTab, setActiveTab] = useState<TabType>('All');
   
   const location = useLocation();
   const searchParams = new URLSearchParams(location.search);
   const currentTab = searchParams.get('tab') || 'batches';
-  
+
   // Modals & Slideovers
   const [showNewBatchModal, setShowNewBatchModal] = useState(false);
   const [selectedBatch, setSelectedBatch] = useState<any>(null);
@@ -40,10 +41,7 @@ export default function PlantOperator() {
 
   // Data for Dispatches
   const [showNewDispatchModal, setShowNewDispatchModal] = useState(false);
-  const [dispatchesData, setDispatchesData] = useState([
-    { id: 1, buyerName: 'Green Agri Solutions', district: 'Yavatmal', batchData: 'Batch #5', weight: 2.800, declaredUse: 'Soil Amendment — Soybean', evidenceDue: '04 May 2026', status: 'Overdue' },
-    { id: 2, buyerName: 'Agrofarm Inputs Pvt. Ltd.', district: 'Akola', batchData: 'Batch #5', weight: 3.500, declaredUse: 'Soil Amendment — Cotton', evidenceDue: '08 Jul 2026', status: 'Received' }
-  ]);
+  const [dispatchesData, setDispatchesData] = useState<any[]>([]);
   const [newDispatchForm, setNewDispatchForm] = useState({
     batch: '',
     buyerName: '',
@@ -55,6 +53,7 @@ export default function PlantOperator() {
   
   // Data State
   const [baggingWeight, setBaggingWeight] = useState<number | null>(null);
+  const [dieselLitres, setDieselLitres] = useState<number | null>(null);
   const [plcData, setPlcData] = useState({ temp: 450, resTime: 45 });
   const [tempHistory, setTempHistory] = useState<{time: string, temp: number}[]>([]);
   const [activeCameraAction, setActiveCameraAction] = useState<"moisture" | "ph" | "bagging" | "evidence" | "seal" | null>(null);
@@ -62,10 +61,19 @@ export default function PlantOperator() {
   const [photos, setPhotos] = useState<any>({});
   
   // Form State
-  const [newBatchForm, setNewBatchForm] = useState({ plant_code: "KLN-01", feedstock_lot_ids: "" });
+  const [newBatchForm, setNewBatchForm] = useState({ plant_code: "KLN-01", feedstock_lot_ids: [] as number[] });
   const [sealForm, setSealForm] = useState({ grabbed: false, sealed: false, batchIdVisible: false, retentionRef: '', error: '' });
 
   const token = localStorage.getItem("token");
+
+  const fetchDeliveries = async () => {
+    try {
+      const res = await fetch("/api/deliveries", { headers: { Authorization: `Bearer ${token}` } });
+      if (res.ok) setDeliveries(await res.json());
+    } catch (e: any) {
+      console.error(e);
+    }
+  };
 
   const fetchDispatches = async () => {
     try {
@@ -85,6 +93,7 @@ export default function PlantOperator() {
       fetchBatches(); // Keep batches updated for the dropdown
       fetchDispatches();
     }
+    fetchDeliveries();
   }, [currentTab]);
 
   useEffect(() => {
@@ -131,16 +140,20 @@ export default function PlantOperator() {
 
   const createBatch = async (e: React.FormEvent) => {
     e.preventDefault();
-    const lotsArray = newBatchForm.feedstock_lot_ids.split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n));
+    if (newBatchForm.feedstock_lot_ids.length === 0) {
+      setMsg("Please select at least one feedstock delivery.");
+      return;
+    }
     const res = await fetch("/api/batches", {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ feedstock_lot_ids: lotsArray, plant_code: newBatchForm.plant_code })
+      body: JSON.stringify({ feedstock_lot_ids: newBatchForm.feedstock_lot_ids, plant_code: newBatchForm.plant_code })
     });
     if(res.ok) {
       fetchBatches();
+      fetchDeliveries();
       setShowNewBatchModal(false);
-      setNewBatchForm({ plant_code: "KLN-01", feedstock_lot_ids: "" });
+      setNewBatchForm({ plant_code: "KLN-01", feedstock_lot_ids: [] as number[] });
       setMsg("New batch created successfully.");
     }
   };
@@ -151,6 +164,15 @@ export default function PlantOperator() {
       const data = await res.json();
       setBaggingWeight(data.weight_t);
       setMsg(`Weighed ${data.weight_t}t via IoT Bagging Scale.`);
+    }
+  };
+
+  const fetchFuelSensor = async () => {
+    const res = await fetch("/api/sensors/fuel", { headers: { Authorization: `Bearer ${token}` } });
+    if (res.ok) {
+      const data = await res.json();
+      setDieselLitres(data.fuel_litres);
+      setMsg(`Fuel consumption registered: ${data.fuel_litres}L via IoT sensor.`);
     }
   };
 
@@ -185,6 +207,10 @@ export default function PlantOperator() {
       setMsg("Error: Must read bagging scale first.");
       return;
     }
+    if (!dieselLitres) {
+      setMsg("Error: Must read fuel consumption sensor first.");
+      return;
+    }
     const id = selectedBatch.id;
     const body = {
       wet_output_mass: baggingWeight,
@@ -193,7 +219,7 @@ export default function PlantOperator() {
       moisture_3: +e.target.m3.value,
       ph: +e.target.ph.value,
       bulk_density_kg_m3: +e.target.density.value,
-      diesel_litres: +e.target.diesel.value,
+      diesel_litres: dieselLitres,
       // photos: photos // normally we'd pass these
     };
     const res = await fetch(`/api/batches/${id}/finalize`, {
@@ -952,6 +978,22 @@ export default function PlantOperator() {
                           {photos.bagging && <img src={photos.bagging} alt="scale" className="h-12 w-12 object-cover rounded shadow" />}
                         </div>
                       </div>
+                      
+                      {/* Fuel Integration block */}
+                      <div className="bg-slate-50 p-4 rounded-lg border border-slate-200 flex flex-col space-y-4">
+                        <div className="flex items-center justify-between">
+                          <label className="text-xs uppercase font-bold text-slate-600">IoT Fuel Sensor Check-in</label>
+                          <div className="flex space-x-2">
+                             <button type="button" onClick={fetchFuelSensor} className="bg-[#18a058] hover:bg-[#148749] text-white px-3 py-1.5 rounded text-xs font-bold uppercase tracking-wider transition-colors shadow-sm">Fetch Fuel Mtr.</button>
+                          </div>
+                        </div>
+                        <div className="flex gap-4 items-center">
+                          <div className="flex-1 bg-white border border-slate-300 rounded p-3 flex justify-between items-center text-xl shadow-inner text-right font-mono">
+                             <span className="text-slate-400 font-sans text-sm">Fuel Used</span>
+                             <span className="font-bold text-slate-800">{dieselLitres ? `${dieselLitres} L` : '0.0 L'}</span>
+                          </div>
+                        </div>
+                      </div>
 
                       {/* QC parameters */}
                       <div className="grid grid-cols-3 gap-4">
@@ -980,10 +1022,6 @@ export default function PlantOperator() {
                         <div>
                           <label className="block text-[10px] uppercase font-bold text-slate-500 mb-1">Bulk Density (kg/m³)</label>
                           <input name="density" type="number" step="1" defaultValue="280" className="w-full border border-slate-300 p-2 rounded-lg bg-white text-sm font-mono focus:ring-2 focus:ring-emerald-500 outline-none" required />
-                        </div>
-                        <div>
-                          <label className="block text-[10px] uppercase font-bold text-slate-500 mb-1">Fuel/Diesel Used (L)</label>
-                          <input name="diesel" type="number" step="1" defaultValue="15" className="w-full border border-slate-300 p-2 rounded-lg bg-white text-sm font-mono focus:ring-2 focus:ring-emerald-500 outline-none" required />
                         </div>
                       </div>
 
@@ -1131,15 +1169,30 @@ export default function PlantOperator() {
               </div>
 
               <div>
-                <label className="block text-sm font-semibold text-[#0e4b31] mb-1.5">Feedstock Lot IDs (comma-separated delivery IDs)</label>
-                <input 
-                  type="text" 
-                  value={newBatchForm.feedstock_lot_ids}
-                  onChange={e => setNewBatchForm({...newBatchForm, feedstock_lot_ids: e.target.value})}
-                  placeholder="e.g. 1, 2, 3, 4"
-                  className="w-full border border-emerald-200 p-2.5 rounded-lg bg-white text-sm text-[#0e4b31] focus:ring-2 focus:ring-[#18a058] focus:border-transparent outline-none transition-shadow" 
-                  required 
-                />
+                <label className="block text-sm font-semibold text-[#0e4b31] mb-1.5">Select Available Feedstock</label>
+                <div className="space-y-2 max-h-48 overflow-y-auto border border-emerald-200 p-2 rounded-lg bg-white">
+                  {deliveries.filter((d: any) => !d.batch_id).length === 0 && (
+                     <div className="text-sm text-slate-500 italic p-2">No unassigned feedstock deliveries available.</div>
+                  )}
+                  {deliveries.filter((d: any) => !d.batch_id).map((d: any) => (
+                    <label key={d.id} className="flex items-center space-x-3 p-2 hover:bg-slate-50 rounded cursor-pointer">
+                      <input 
+                        type="checkbox"
+                        className="w-4 h-4 text-emerald-600 border-slate-300 rounded focus:ring-emerald-500"
+                        checked={newBatchForm.feedstock_lot_ids.includes(d.id)}
+                        onChange={(e) => {
+                          const ids = [...newBatchForm.feedstock_lot_ids];
+                          if (e.target.checked) ids.push(d.id);
+                          else ids.splice(ids.indexOf(d.id), 1);
+                          setNewBatchForm({...newBatchForm, feedstock_lot_ids: ids});
+                        }}
+                      />
+                      <div className="text-sm text-slate-700">
+                        <span className="font-semibold text-emerald-800">LT-{String(d.id).padStart(3, '0')}</span> &mdash; {d.wet_mass_tonnes}t from {d.farmer_id} ({d.full_name})
+                      </div>
+                    </label>
+                  ))}
+                </div>
               </div>
 
               <div className="flex items-center space-x-3 pt-2">

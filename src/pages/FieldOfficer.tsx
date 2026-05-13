@@ -6,12 +6,15 @@ import LocationPickerMap from "../components/LocationPickerMap";
 export default function FieldOfficer() {
   const [farmers, setFarmers] = useState<any[]>([]);
   const [deliveries, setDeliveries] = useState<any[]>([]);
+  const [dispatches, setDispatches] = useState<any[]>([]);
   const [msg, setMsg] = useState("");
   const [scaleWeight, setScaleWeight] = useState<number | null>(null);
   const [photoInfo, setPhotoInfo] = useState<{ url: string, ts: string, lat?: number, lng?: number } | null>(null);
   const [moisturePhotoInfo, setMoisturePhotoInfo] = useState<{ url: string, ts: string, lat?: number, lng?: number } | null>(null);
+  const [evidencePhotoInfo, setEvidencePhotoInfo] = useState<{ url: string, ts: string, lat?: number, lng?: number } | null>(null);
   const [farmerLocation, setFarmerLocation] = useState<{ lat: number, lng: number } | null>(null);
-  const [activeCameraAction, setActiveCameraAction] = useState<"delivery" | "moisture" | null>(null);
+  const [activeCameraAction, setActiveCameraAction] = useState<"delivery" | "moisture" | "evidence" | null>(null);
+  const [evidenceDispatchId, setEvidenceDispatchId] = useState<number | null>(null);
   const token = localStorage.getItem("token");
   
   const [searchParams] = useSearchParams();
@@ -25,6 +28,7 @@ export default function FieldOfficer() {
   useEffect(() => {
     fetchFarmers();
     fetchDeliveries();
+    fetchDispatches();
   }, []);
 
   const fetchFarmers = async () => {
@@ -35,6 +39,11 @@ export default function FieldOfficer() {
   const fetchDeliveries = async () => {
     const res = await fetch("/api/deliveries", { headers: { Authorization: `Bearer ${token}` } });
     if(res.ok) setDeliveries(await res.json());
+  };
+
+  const fetchDispatches = async () => {
+    const res = await fetch("/api/dispatches", { headers: { Authorization: `Bearer ${token}` } });
+    if (res.ok) setDispatches(await res.json());
   };
 
   const readScale = async () => {
@@ -68,6 +77,9 @@ export default function FieldOfficer() {
     } else if (activeCameraAction === "moisture") {
       setMoisturePhotoInfo({ url: dataUrl, ts, lat, lng });
       setMsg("Moisture photo captured & verified.");
+    } else if (activeCameraAction === "evidence") {
+      setEvidencePhotoInfo({ url: dataUrl, ts, lat, lng });
+      setMsg("End-use evidence photo captured.");
     }
     setActiveCameraAction(null);
   };
@@ -100,6 +112,27 @@ export default function FieldOfficer() {
       e.target.reset();
     } else {
       setMsg("Error: " + d.error);
+    }
+  };
+
+  const uploadEvidence = async (id: number) => {
+    if (!evidencePhotoInfo) {
+      setMsg("Please capture a photo first.");
+      return;
+    }
+    const res = await fetch(`/api/dispatches/${id}/evidence`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ photo_url: evidencePhotoInfo.url })
+    });
+    if (res.ok) {
+      setMsg("Evidence uploaded successfully.");
+      setEvidencePhotoInfo(null);
+      setEvidenceDispatchId(null);
+      fetchDispatches();
+    } else {
+      const data = await res.json();
+      setMsg(`Error: ${data.error}`);
     }
   };
 
@@ -162,7 +195,7 @@ export default function FieldOfficer() {
         </div>
       )}
 
-      {tab === 'deliveries' ? (
+      {tab === 'deliveries' && (
         <div className="flex-1 flex flex-col min-h-0 bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
           <div className="p-4 md:p-6 border-b border-slate-200 flex flex-col md:flex-row md:items-center justify-between gap-4">
             <div>
@@ -233,7 +266,70 @@ export default function FieldOfficer() {
             </div>
           </div>
         </div>
-      ) : (
+      )}
+
+      {tab === 'dispatches' && (
+        <div className="flex-1 flex flex-col min-h-0 bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+          <div className="p-4 md:p-6 border-b border-slate-200 flex flex-col md:flex-row md:items-center justify-between gap-4">
+            <div>
+              <h2 className="text-xl md:text-2xl font-bold text-slate-800">Dispatch Locations & Evidence</h2>
+              <p className="text-sm text-slate-500 mt-1">View dispatches and capture time-stamped end-use photos</p>
+            </div>
+          </div>
+          <div className="flex-1 overflow-y-auto p-4 md:p-6 bg-slate-50">
+            <div className="grid gap-4">
+              {dispatches.map(d => (
+                <div key={d.id} className="bg-white border text-sm border-slate-200 rounded-xl p-4 md:p-5 flex flex-col md:flex-row md:items-center justify-between gap-4 hover:shadow-md transition-shadow">
+                   <div className="flex-1 flex flex-col md:flex-row gap-4 md:gap-8">
+                     <div>
+                       <div className="text-[10px] uppercase font-bold text-slate-400 mb-0.5">Batch ID</div>
+                       <div className="font-mono font-bold text-[#18a058]">{d.batch_id_label}</div>
+                     </div>
+                     <div>
+                       <div className="text-[10px] uppercase font-bold text-slate-400 mb-0.5">Buyer</div>
+                       <div className="font-semibold text-slate-800">{d.buyer_name}</div>
+                       <div className="text-xs text-slate-500">{d.buyer_district}</div>
+                     </div>
+                     <div>
+                       <div className="text-[10px] uppercase font-bold text-slate-400 mb-0.5">Weight (t)</div>
+                       <div className="font-mono font-medium text-slate-800">{d.dispatch_weight_t}t</div>
+                     </div>
+                     <div>
+                       <div className="text-[10px] uppercase font-bold text-slate-400 mb-0.5">End Use Status</div>
+                       <div className="font-semibold uppercase text-xs">{d.evidence_status}</div>
+                       {d.evidence_status === 'PENDING' && (
+                         <div className="text-[10px] uppercase text-red-500 mt-0.5 font-bold">Due: {new Date(d.evidence_due_date).toLocaleDateString()}</div>
+                       )}
+                     </div>
+                   </div>
+                   <div className="flex flex-col gap-2">
+                     {d.evidence_status !== 'RECEIVED' && (
+                       <div className="flex flex-col gap-2">
+                         <button onClick={(e) => { e.preventDefault(); setEvidenceDispatchId(d.id); setActiveCameraAction('evidence'); }} className="bg-slate-100 border border-slate-200 hover:bg-slate-200 text-slate-700 text-xs font-semibold px-4 py-2 rounded-lg whitespace-nowrap">
+                           📷 Capture Evidence Photo
+                         </button>
+                         {evidencePhotoInfo && evidenceDispatchId === d.id && (
+                           <button onClick={() => uploadEvidence(d.id)} className="bg-[#18a058] hover:bg-[#148749] text-white text-xs font-bold px-4 py-2 rounded-lg whitespace-nowrap shadow-sm">
+                             Upload {evidencePhotoInfo.ts.substring(0, 10)}
+                           </button>
+                         )}
+                       </div>
+                     )}
+                     {d.evidence_status === 'RECEIVED' && (
+                        <div className="text-[#18a058] text-xs font-bold text-right pt-2 flex items-center gap-1 justify-end"><span>✓</span> <span>Evidence Submitted</span></div>
+                     )}
+                   </div>
+                </div>
+              ))}
+              {dispatches.length === 0 && (
+                <div className="text-center p-8 text-slate-400 text-sm">No dispatches found.</div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {tab === 'farmers' && (
         <div className="flex-1 flex flex-col min-h-0 bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
           <div className="p-4 md:p-6 border-b border-slate-200 flex flex-col md:flex-row md:items-center justify-between gap-4">
             <div>

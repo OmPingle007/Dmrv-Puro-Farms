@@ -73,8 +73,32 @@ export function runCarbonEngine(batchIdLabel: string) {
   const ebiomass = 0.0015 * qbiochar;
 
   // 11. Eproduction
-  // For MVP, mock plant avg or get from batch
-  const eproduction = ( (50 * 0.00071) + (batch.diesel_litres * 0.00268) ); 
+  // Fetch diesel from the batch
+  const plantDiesel = batch.diesel_litres || 0;
+  
+  // Calculate transport fuel
+  // Fetch feedstock deliveries for this batch to estimate transport diesel
+  let feedstockLotIds = [];
+  try {
+    feedstockLotIds = JSON.parse(batch.feedstock_lot_ids);
+  } catch (e) {}
+  
+  let transportDieselFeedstock = 0;
+  if (feedstockLotIds && feedstockLotIds.length > 0) {
+    const placeholders = feedstockLotIds.map(() => '?').join(',');
+    const deliveries = db.prepare(`SELECT gps_lat, gps_lng FROM deliveries WHERE id IN (${placeholders})`).all(...feedstockLotIds) as any[];
+    // Rough estimate: Assume avg distance 20km, fuel efficiency 5km/L => 4L per delivery
+    transportDieselFeedstock = deliveries.length * 4;
+  }
+
+  // Fetch dispatches for this batch to estimate outbound transport fuel
+  const dispatches = db.prepare(`SELECT dispatch_weight_t FROM dispatches WHERE batch_id_label = ?`).all(batchIdLabel) as any[];
+  // Rough estimate: Assume avg distance 50km, fuel efficiency 4km/L for larger trucks => 12.5L per dispatch
+  let transportDieselBiochar = dispatches.length * 12.5;
+
+  const totalDiesel = plantDiesel + transportDieselFeedstock + transportDieselBiochar;
+
+  const eproduction = ( (50 * 0.00071) + (totalDiesel * 0.00268) ); 
 
   // 12. Eleakage
   const eleakage = 0;

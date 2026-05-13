@@ -29,6 +29,60 @@ const authenticate = (roles: string[]) => (req: any, res: any, next: any) => {
   }
 };
 
+router.get("/batches/:id/trace", authenticate(["AUDITOR", "MANAGEMENT"]), (req, res) => {
+  const { id } = req.params;
+  const batch = db.prepare('SELECT * FROM batches WHERE id = ?').get(id) as any;
+  if (!batch) return res.status(404).json({ error: "Batch not found" });
+
+  let deliveries = [];
+  try {
+    const lotIds = JSON.parse(batch.feedstock_lot_ids || "[]");
+    if (lotIds.length > 0) {
+      const placeholders = lotIds.map(() => '?').join(',');
+      deliveries = db.prepare(`SELECT * FROM deliveries WHERE id IN (${placeholders})`).all(...lotIds);
+    }
+  } catch(e) {}
+
+  const plcLogs = db.prepare('SELECT * FROM plc_logs WHERE batch_id_label = ? ORDER BY timestamp_utc ASC').all(batch.batch_id_label);
+  const coa = db.prepare('SELECT * FROM coa_records WHERE batch_id_label = ?').get(batch.batch_id_label);
+  const carbon = db.prepare('SELECT * FROM carbon_calculations WHERE batch_id_label = ?').get(batch.batch_id_label);
+  const flags = db.prepare('SELECT * FROM flags WHERE batch_id_label = ?').all(batch.batch_id_label);
+  const dispatches = db.prepare('SELECT * FROM dispatches WHERE batch_id_label = ?').all(batch.batch_id_label);
+
+  res.json({ batch, deliveries, plcLogs, coa, carbon, flags, dispatches });
+});
+
+router.post("/batches/:id/verify_hash", authenticate(["AUDITOR", "MANAGEMENT"]), (req, res) => {
+  const { id } = req.params;
+  const batch = db.prepare('SELECT * FROM batches WHERE id = ?').get(id) as any;
+  if (!batch) return res.status(404).json({ error: "Batch not found" });
+
+  try {
+    const lotIds = JSON.parse(batch.feedstock_lot_ids || "[]");
+    const record_hash_calc = crypto.createHash('sha256').update(batch.batch_id_label + JSON.stringify(lotIds) + batch.previous_batch_hash).digest('hex');
+    
+    if (record_hash_calc === batch.record_hash) {
+      res.json({ status: "VERIFIED", hash: record_hash_calc });
+    } else {
+      res.json({ status: "TAMPERED", expected: batch.record_hash, actual: record_hash_calc });
+    }
+  } catch (e) {
+    res.status(500).json({ error: "Verification failed" });
+  }
+});
+
+router.post("/batches/:id/ncr", authenticate(["AUDITOR"]), (req, res) => {
+  const { id } = req.params;
+  const { field, description } = req.body;
+  const batch = db.prepare('SELECT batch_id_label FROM batches WHERE id = ?').get(id) as any;
+  if (!batch) return res.status(404).json({ error: "Batch not found" });
+
+  const result = db.prepare('INSERT INTO flags (rule_id, record_type, record_id, batch_id_label, triggered_at_utc, status, resolution_notes) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .run('AUDIT-NCR', field, id, batch.batch_id_label, new Date().toISOString(), 'OPEN', description);
+  
+  res.json({ message: "NCR raised successfully", id: result.lastInsertRowid });
+});
+
 router.post("/auth/login", (req, res) => {
   const { email, password } = req.body;
   const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email) as any;
@@ -72,6 +126,11 @@ router.get("/scales/weighbridge", authenticate(["FIELD_OFFICER"]), (req: any, re
 router.get("/scales/bagging", authenticate(["PLANT_OPERATOR"]), (req: any, res: any) => {
   const weight = +(Math.random() * 3 + 1).toFixed(2);
   res.json({ instrument_id: 'BS-01', weight_t: weight, timestamp_utc: new Date().toISOString() });
+});
+
+router.get("/sensors/fuel", authenticate(["PLANT_OPERATOR"]), (req: any, res: any) => {
+  const fuel = +(Math.random() * 5 + 10).toFixed(1); // 10-15 L
+  res.json({ instrument_id: 'FM-01', fuel_litres: fuel, timestamp_utc: new Date().toISOString() });
 });
 
 // Deliveries (Field Officer)
@@ -133,6 +192,12 @@ router.post("/batches", authenticate(["PLANT_OPERATOR"]), (req, res) => {
 
   const result = db.prepare(`INSERT INTO batches (batch_id_label, plant_code, feedstock_lot_ids, status, record_hash, previous_batch_hash, created_at_utc) VALUES (?, ?, ?, ?, ?, ?, ?)`)
     .run(batch_id_label, plant_code, JSON.stringify(feedstock_lot_ids), 'OPEN', record_hash, previous_batch_hash, now);
+
+  if (feedstock_lot_ids && feedstock_lot_ids.length > 0) {
+    const placeholders = feedstock_lot_ids.map(() => '?').join(',');
+    db.prepare(`UPDATE deliveries SET batch_id = ? WHERE id IN (${placeholders})`)
+      .run(batch_id_label, ...feedstock_lot_ids);
+  }
 
   // Simulate IoT PLC stream
   db.prepare(`INSERT INTO plc_logs (batch_id_label, sensor_id, timestamp_utc, temperature_c, residence_time_min, quality_flag) VALUES (?, ?, ?, ?, ?, ?)`)
@@ -271,11 +336,11 @@ router.get("/farmers", authenticate(["FIELD_OFFICER", "PLANT_OPERATOR", "MANAGEM
   res.json(farmers);
 });
 
-router.get("/dispatches", authenticate(["PLANT_OPERATOR", "MANAGEMENT", "AUDITOR"]), (req, res) => {
+router.get("/dispatches", authenticate(["FIELD_OFFICER", "PLANT_OPERATOR", "MANAGEMENT", "AUDITOR"]), (req, res) => {
   const ds = db.prepare('SELECT id, batch_id_label, buyer_name, buyer_district, declared_use, dispatch_weight_t, price_per_tonne, dispatch_date_utc, evidence_due_date, evidence_status FROM dispatches ORDER BY dispatch_date_utc DESC').all();
   res.json(ds);
 });
-router.post("/dispatches/:id/evidence", authenticate(["PLANT_OPERATOR"]), (req, res) => {
+router.post("/dispatches/:id/evidence", authenticate(["FIELD_OFFICER", "PLANT_OPERATOR"]), (req, res) => {
   const { id } = req.params;
   const { photo_url } = req.body;
   const now = new Date().toISOString();
@@ -299,8 +364,9 @@ router.get("/batches", authenticate(["PLANT_OPERATOR", "MANAGEMENT", "AUDITOR", 
   res.json(batches);
 });
 
-router.post("/flags/:id/resolve", authenticate(["MANAGEMENT"]), (req, res) => {
-  db.prepare("UPDATE flags SET status = 'RESOLVED' WHERE id = ?").run(req.params.id);
+router.post("/flags/:id/resolve", authenticate(["MANAGEMENT", "AUDITOR"]), (req, res) => {
+  const { status } = req.body || { status: 'RESOLVED' };
+  db.prepare("UPDATE flags SET status = ? WHERE id = ?").run(status, req.params.id);
   res.json({ success: true });
 });
 
@@ -309,10 +375,15 @@ router.get("/dashboard", authenticate(["MANAGEMENT"]), (req, res) => {
   const activeFlags = db.prepare("SELECT COUNT(*) as c FROM flags WHERE status = 'OPEN'").get() as any;
   const flaggedBatches = db.prepare("SELECT * FROM flags WHERE status = 'OPEN' ORDER BY id DESC").all();
   const expiringCerts = db.prepare("SELECT * FROM calibration_certs WHERE status = 'VALID' OR status = 'EXPIRING'").all();
+  const dispatches = db.prepare("SELECT SUM(dispatch_weight_t) as t FROM dispatches").get() as any;
+  const batches = db.prepare("SELECT b.*, c.corcs_net FROM batches b LEFT JOIN carbon_calculations c ON b.batch_id_label = c.batch_id_label ORDER BY id DESC").all();
+
   res.json({
     corcsTotal: corcsTotal?.t || 0,
     activeFlags: activeFlags?.c || 0,
     flaggedBatches: flaggedBatches || [],
+    dispatchesTotal: dispatches?.t || 0,
+    batches: batches || [],
     expiringCerts: expiringCerts || []
   });
 });

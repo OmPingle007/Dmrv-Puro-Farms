@@ -5,7 +5,7 @@
 
 import { BrowserRouter, Routes, Route, useNavigate, useLocation, Navigate, Link } from "react-router-dom";
 import { useState } from "react";
-import { LogOut, Leaf, Wrench, Flag, Settings2, Truck } from "lucide-react";
+import { LogOut, Leaf, Wrench, Flag, Settings2, Truck, FileWarning, AlertTriangle, FileSignature } from "lucide-react";
 import Login from "./pages/Login.tsx";
 import FieldOfficer from "./pages/FieldOfficer.tsx";
 import PlantOperator from "./pages/PlantOperator.tsx";
@@ -137,8 +137,11 @@ function Layout() {
           
           {role === 'FIELD_OFFICER' && (
             <>
-              <Link to="/field?tab=deliveries" className={`flex items-center px-4 py-2.5 mx-2 rounded-lg text-sm transition-colors ${tab === 'deliveries' ? 'bg-emerald-500 text-white font-medium shadow-sm' : 'text-white/70 hover:bg-white/5'}`}>
-                 <span className="mr-3">🚚</span> Deliveries
+              <Link to="/field?tab=deliveries" className={`flex items-center px-4 py-2.5 mx-2 rounded-lg text-sm transition-colors ${tab === 'deliveries' || !tab ? 'bg-[#18a058] text-white font-medium shadow-sm' : 'text-white/70 hover:bg-white/5'}`}>
+                 <Truck size={16} className="mr-3" /> Deliveries
+              </Link>
+              <Link to="/field?tab=dispatches" className={`flex items-center px-4 py-2.5 mx-2 mt-1 rounded-lg text-sm transition-colors ${tab === 'dispatches' ? 'bg-[#18a058] text-white font-medium shadow-sm' : 'text-white/70 hover:bg-white/5'}`}>
+                <Leaf size={16} className="mr-3" /> End-Use Evidence
               </Link>
               <Link to="/field?tab=farmers" className={`flex items-center px-4 py-2.5 mx-2 mt-1 rounded-lg text-sm transition-colors ${tab === 'farmers' ? 'bg-[#18a058] text-white font-medium shadow-sm' : 'text-white/70 hover:bg-white/5'}`}>
                  <span className="mr-3">🧑‍🌾</span> Farmers
@@ -149,9 +152,18 @@ function Layout() {
           {role === 'AUDITOR' && (
             <div className="px-4 py-4 mt-2 border-t border-white/5">
               <div className="text-[10px] font-semibold text-white/40 uppercase tracking-widest mb-3">Compliance</div>
-              <div className="flex items-center text-sm text-white font-medium">
-                <span className="mr-3">📜</span> Audit Trail (Immutable)
-              </div>
+              <Link to="/auditor?tab=workspace" className={`flex items-center px-4 py-2.5 mx-2 rounded-lg text-sm transition-colors ${tab === 'workspace' || !tab ? 'bg-[#18a058] text-white font-medium shadow-sm' : 'text-white/70 hover:bg-white/5'}`}>
+                 <span className="mr-3">📜</span> Audit Workspace
+              </Link>
+              <Link to="/auditor?tab=ncr" className={`flex items-center px-4 py-2.5 mx-2 mt-1 rounded-lg text-sm transition-colors ${tab === 'ncr' ? 'bg-[#18a058] text-white font-medium shadow-sm' : 'text-white/70 hover:bg-white/5'}`}>
+                 <FileWarning size={16} className="mr-3 text-white/50" /> NCR
+              </Link>
+              <Link to="/auditor?tab=flags" className={`flex items-center px-4 py-2.5 mx-2 mt-1 rounded-lg text-sm transition-colors ${tab === 'flags' ? 'bg-[#18a058] text-white font-medium shadow-sm' : 'text-white/70 hover:bg-white/5'}`}>
+                 <Flag size={16} className="mr-3 text-white/50" /> Flags
+              </Link>
+              <Link to="/auditor?tab=dispatches" className={`flex items-center px-4 py-2.5 mx-2 mt-1 rounded-lg text-sm transition-colors ${tab === 'dispatches' ? 'bg-[#18a058] text-white font-medium shadow-sm' : 'text-white/70 hover:bg-white/5'}`}>
+                 <Truck size={16} className="mr-3 text-white/50" /> Dispatches
+              </Link>
             </div>
           )}
           
