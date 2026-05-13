@@ -34,7 +34,11 @@ export default function Management() {
   const resolveFlag = async (flagId: number) => {
     const res = await fetch(`/api/flags/${flagId}/resolve`, {
       method: "POST",
-      headers: { Authorization: `Bearer ${token}` }
+      headers: { 
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}` 
+      },
+      body: JSON.stringify({ status: 'RESOLVED' })
     });
     if (res.ok) {
       fetchData();
@@ -274,14 +278,18 @@ export default function Management() {
                 <div>
                   <div className="flex items-center justify-between mb-4">
                     <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">{f.rule_id}</span>
-                    <span className={`px-2 py-0.5 rounded text-[9px] font-black uppercase tracking-tighter ${f.blocksDispatch ? 'bg-red-100 text-red-700 border border-red-200' : 'bg-slate-100 text-slate-600'}`}>
-                      {f.blocksDispatch ? 'Blocks Dispatch' : 'Warning'}
+                    <span className={`px-2 py-0.5 rounded text-[9px] font-black uppercase tracking-tighter ${f.is_blocking ? 'bg-red-100 text-red-700 border border-red-200' : 'bg-slate-100 text-slate-600'}`}>
+                      {f.is_blocking ? 'Blocks Dispatch' : 'Warning'}
                     </span>
                   </div>
-                  <h4 className="text-lg font-bold text-slate-900 leading-tight mb-2 underline decoration-indigo-500/20 underline-offset-4">{f.description}</h4>
-                  <p className="text-xs text-slate-500 font-mono mb-4">Target: Batch {f.batch_id_label || f.record_id}</p>
+                  <h4 className="text-lg font-bold text-slate-900 leading-tight mb-2 underline decoration-indigo-500/20 underline-offset-4">{f.rule_id}: Integrity alert triggered</h4>
+                  <p className="text-xs text-slate-500 font-mono mb-4">Target: {f.record_type} #{f.record_id || f.batch_id_label}</p>
+                  <p className="text-sm text-slate-600 mb-4">{f.resolution_notes || 'Integrity violation detected during process validation.'}</p>
                 </div>
-                <button onClick={() => resolveFlag(f.id)} className="w-full mt-4 bg-slate-900 text-white text-[10px] font-black uppercase tracking-widest py-3 rounded-xl hover:bg-slate-800 transition-colors">Resolve Issue</button>
+                <div className="flex items-center justify-between mt-4">
+                  <span className="text-[10px] text-slate-400">{new Date(f.triggered_at_utc).toLocaleString()}</span>
+                  <button onClick={() => resolveFlag(f.id)} className="px-4 py-2 bg-slate-900 text-white text-[10px] font-black uppercase tracking-widest rounded-xl hover:bg-slate-800 transition-colors">Resolve</button>
+                </div>
               </div>
             ))}
             {data.flags.length === 0 && <div className="col-span-full py-20 text-center bg-white rounded-3xl border-2 border-dashed border-slate-200 text-slate-400 font-bold">No active integrity flags found.</div>}

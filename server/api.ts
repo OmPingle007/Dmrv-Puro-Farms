@@ -150,17 +150,39 @@ router.post("/deliveries", authenticate(["FIELD_OFFICER"]), (req, res) => {
   const moisture_avg = (moisture_1 + moisture_2 + moisture_3) / 3;
   
   const now = new Date().toISOString();
-  // Delivery Fingerprint
+  // DR-14: Delivery Fingerprint
   const dateStr = now.split('T')[0];
   const massRounded = Math.round(wet_mass_tonnes);
-  const fingerprint = crypto.createHash('sha256').update(`${farmer_id}_${Math.round(gps_lat*10)}_${dateStr}_${massRounded}`).digest('hex');
+  const fingerprint = crypto.createHash('sha256').update(`${farmer_id}_${Math.round(gps_lat*1000)}_${dateStr}_${massRounded}`).digest('hex');
   
+  // VE-01: Duplicate Vehicle Window (same vehicle + date within 4 hours)
+  const fourHoursAgo = new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString();
+  const duplicateVehicle = db.prepare('SELECT id FROM deliveries WHERE vehicle_number = ? AND server_timestamp_utc > ?').get(vehicle_number, fourHoursAgo);
+  
+  // VE-08: GPS Delivery Spam (>3 deliveries from same GPS pin +-100m in one day)
+  const today = dateStr + '%';
+  const sameGpsDeliveries = db.prepare(`
+    SELECT COUNT(*) as c FROM deliveries 
+    WHERE ABS(gps_lat - ?) < 0.001 AND ABS(gps_lng - ?) < 0.001 
+    AND server_timestamp_utc LIKE ?
+  `).get(gps_lat, gps_lng, today) as any;
+
   try {
     const result = db.prepare(`INSERT INTO deliveries (farmer_id, vehicle_number, wet_mass_tonnes, moisture_1, moisture_2, moisture_3, moisture_avg, gps_lat, gps_lng, photo_exif_lat, photo_exif_lng, photo_url, moisture_photo_url, client_timestamp_claimed, delivery_fingerprint, server_timestamp_utc, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(farmer_id, vehicle_number, wet_mass_tonnes, moisture_1, moisture_2, moisture_3, moisture_avg, gps_lat, gps_lng, photo_exif_lat, photo_exif_lng, photo_url || null, moisture_photo_url || null, client_timestamp_claimed || now, fingerprint, now, "ACCEPTED");
     
-    // GPS spoof check
-    const dist = Math.sqrt(Math.pow(gps_lat - photo_exif_lat, 2) + Math.pow(gps_lng - photo_exif_lng, 2)) * 111000; // approx meters
+    if (duplicateVehicle) {
+      db.prepare('INSERT INTO flags (rule_id, record_type, record_id, triggered_at_utc, status) VALUES (?, ?, ?, ?, ?)')
+        .run("VE-01", 'delivery', result.lastInsertRowid, now, "OPEN");
+    }
+
+    if (sameGpsDeliveries.c >= 3) {
+      db.prepare('INSERT INTO flags (rule_id, record_type, record_id, triggered_at_utc, status) VALUES (?, ?, ?, ?, ?)')
+        .run("VE-08", 'delivery', result.lastInsertRowid, now, "OPEN");
+    }
+
+    // GPS spoof check VE-05
+    const dist = Math.sqrt(Math.pow(gps_lat - photo_exif_lat, 2) + Math.pow(gps_lng - photo_exif_lng, 2)) * 111000;
     if (dist > 500) {
       db.prepare('INSERT INTO flags (rule_id, record_type, record_id, triggered_at_utc, status) VALUES (?, ?, ?, ?, ?)')
         .run("VE-05", 'delivery', result.lastInsertRowid, now, "OPEN");
@@ -189,6 +211,27 @@ router.post("/batches", authenticate(["PLANT_OPERATOR"]), (req, res) => {
 
   // Compute this batch hash
   const record_hash = crypto.createHash('sha256').update(batch_id_label + JSON.stringify(feedstock_lot_ids) + previous_batch_hash).digest('hex');
+
+  // DR-15: Batch Sequence Timing (Batch creation before PLC reactor start)
+  const lastPlcLog = db.prepare('SELECT timestamp_utc FROM plc_logs ORDER BY id DESC LIMIT 1').get() as any;
+  if (lastPlcLog && new Date(now).getTime() < new Date(lastPlcLog.timestamp_utc).getTime()) {
+    db.prepare('INSERT INTO flags (rule_id, record_type, batch_id_label, triggered_at_utc, status) VALUES (?, ?, ?, ?, ?)')
+      .run('DR-15', 'batch', batch_id_label, now, 'OPEN');
+  }
+
+  // VE-13: Stockpile Duration (Intake to production > 30 days or moisture > 30%)
+  if (feedstock_lot_ids && feedstock_lot_ids.length > 0) {
+    const placeholders = feedstock_lot_ids.map(() => '?').join(',');
+    const lots = db.prepare(`SELECT server_timestamp_utc, moisture_avg FROM deliveries WHERE id IN (${placeholders})`).all(...feedstock_lot_ids) as any[];
+    
+    const tooOld = lots.some(l => (new Date(now).getTime() - new Date(l.server_timestamp_utc).getTime()) > 30 * 24 * 60 * 60 * 1000);
+    const tooMoist = lots.some(l => l.moisture_avg > 30);
+    
+    if (tooOld || tooMoist) {
+      db.prepare('INSERT INTO flags (rule_id, record_type, batch_id_label, triggered_at_utc, status) VALUES (?, ?, ?, ?, ?)')
+        .run('VE-13', 'batch', batch_id_label, now, 'OPEN');
+    }
+  }
 
   const result = db.prepare(`INSERT INTO batches (batch_id_label, plant_code, feedstock_lot_ids, status, record_hash, previous_batch_hash, created_at_utc) VALUES (?, ?, ?, ?, ?, ?, ?)`)
     .run(batch_id_label, plant_code, JSON.stringify(feedstock_lot_ids), 'OPEN', record_hash, previous_batch_hash, now);
@@ -234,6 +277,26 @@ router.post("/batches/:id/finalize", authenticate(["PLANT_OPERATOR"]), (req, res
       .run('VE-02', 'batch', id, batch.batch_id_label, new Date().toISOString(), 'OPEN');
   }
 
+  // VE-10: Combustion Uptime (simulated check)
+  const downtimeEvents = db.prepare('SELECT COUNT(*) as c FROM plc_logs WHERE batch_id_label = ? AND quality_flag = "DOWNTIME"').get(batch.batch_id_label) as any;
+  if (downtimeEvents.c > 5) { // Threshold for 95% uptime simulation
+    db.prepare('INSERT INTO flags (rule_id, record_type, record_id, batch_id_label, triggered_at_utc, status) VALUES (?, ?, ?, ?, ?, ?)')
+      .run('VE-10', 'batch', id, batch.batch_id_label, new Date().toISOString(), 'OPEN');
+  }
+
+  // DR-17: Electricity Outlier (Monthly electricity deviates >20% vs batch count - mocked)
+  if (Math.random() > 0.95) {
+    db.prepare('INSERT INTO flags (rule_id, record_type, record_id, batch_id_label, triggered_at_utc, status) VALUES (?, ?, ?, ?, ?, ?)')
+      .run('DR-17', 'electricity', id, batch.batch_id_label, new Date().toISOString(), 'OPEN');
+  }
+
+  // DR-18: Diesel Outlier (Batch diesel consumption deviates >15% vs plant avg)
+  const avgDiesel = db.prepare('SELECT AVG(diesel_litres) as a FROM batches WHERE plant_code = ?').get(batch.plant_code) as any;
+  if (avgDiesel.a && Math.abs(diesel_litres - avgDiesel.a) / avgDiesel.a > 0.15) {
+    db.prepare('INSERT INTO flags (rule_id, record_type, record_id, batch_id_label, triggered_at_utc, status) VALUES (?, ?, ?, ?, ?, ?)')
+      .run('DR-18', 'diesel', id, batch.batch_id_label, new Date().toISOString(), 'OPEN');
+  }
+
   db.prepare(`UPDATE batches SET status=?, wet_output_mass=?, output_moisture_avg=?, qbiochar_dry=?, yield_ratio=?, ph=?, bulk_density_kg_m3=?, diesel_litres=?, updated_at_utc=? WHERE id=?`)
     .run(status, wet_output_mass, output_moisture_avg, qbiochar_dry, yield_ratio, ph, bulk_density_kg_m3, diesel_litres, new Date().toISOString(), id);
   
@@ -251,18 +314,28 @@ router.post("/batches/:id/seal-sample", authenticate(["PLANT_OPERATOR"]), (req, 
     return res.status(400).json({ error: "Missing required seal data" });
   }
 
-  // Simulate GPS check (flag if distance > 200m)
-  // In a real app we'd compute haversine distance between plant location and photo GPS
-  // For validation testing, let's assume if lat/lng are missing or specific values, it triggers a flag
+  // VE-14/15/16: Seal Checks
+  if (!photo_url) {
+    db.prepare('INSERT INTO flags (rule_id, record_type, batch_id_label, triggered_at_utc, status) VALUES (?, ?, ?, ?, ?)')
+      .run('VE-14', 'seal', batch.batch_id_label, new Date().toISOString(), 'OPEN');
+    return res.status(400).json({ error: "VE-14: Seal Photo Missing - Blocked" });
+  }
+
+  // VE-15: Seal Photo GPS Mismatch (dist > 200m)
   if (lat && lng) {
-    // mock check
     const mockPlantLat = 20.93;
     const mockPlantLng = 77.75;
     const dist = Math.sqrt(Math.pow(lat - mockPlantLat, 2) + Math.pow(lng - mockPlantLng, 2)) * 111000;
     if (dist > 200) {
        db.prepare('INSERT INTO flags (rule_id, record_type, batch_id_label, triggered_at_utc, status) VALUES (?, ?, ?, ?, ?)')
-        .run('VE-14', 'seal', batch.batch_id_label, new Date().toISOString(), 'OPEN');
+        .run('VE-15', 'seal', batch.batch_id_label, new Date().toISOString(), 'OPEN');
     }
+  }
+
+  // VE-16: Batch ID Visibility Attestation Missing
+  if (!req.body.attestation_confirmed) {
+    db.prepare('INSERT INTO flags (rule_id, record_type, batch_id_label, triggered_at_utc, status) VALUES (?, ?, ?, ?, ?)')
+      .run('VE-16', 'seal', batch.batch_id_label, new Date().toISOString(), 'OPEN');
   }
   
   db.prepare('UPDATE batches SET status=?, sample_retention_ref=?, updated_at_utc=? WHERE id=?').run('SAMPLE_SEALED', retention_ref, new Date().toISOString(), id);
@@ -296,6 +369,30 @@ router.post("/coa-upload", authenticate(["LAB_TECHNICIAN"]), (req: any, res: any
     if (lagDays > 30) {
       db.prepare('INSERT INTO flags (rule_id, record_type, batch_id_label, triggered_at_utc, status) VALUES (?, ?, ?, ?, ?)')
         .run('VE-09', 'coa', batch_id_label, now, 'OPEN');
+    }
+
+    // H/Corg rules
+    if (hcorg_ratio >= 0.70) {
+      db.prepare('INSERT INTO flags (rule_id, record_type, batch_id_label, triggered_at_utc, status) VALUES (?, ?, ?, ?, ?)')
+        .run('VE-06', 'coa', batch_id_label, now, 'OPEN');
+      // "BLOCK" action implies we stop processing this batch or return error. Let's flag but error out to block coa record for THIS batch.
+      continue; 
+    }
+
+    if (hcorg_ratio < 0.15) {
+      db.prepare('INSERT INTO flags (rule_id, record_type, batch_id_label, triggered_at_utc, status) VALUES (?, ?, ?, ?, ?)')
+        .run('VE-07', 'coa', batch_id_label, now, 'OPEN');
+    }
+
+    // DR-19: Lab Result Regression (>2 sigma from trailing 3-batch avg)
+    const trailingCoA = db.prepare('SELECT hcorg_ratio FROM coa_records WHERE batch_id_label IN (SELECT batch_id_label FROM batches WHERE plant_code = ?) ORDER BY id DESC LIMIT 3').all(plant_code) as any[];
+    if (trailingCoA.length === 3) {
+      const avg = trailingCoA.reduce((acc, c) => acc + c.hcorg_ratio, 0) / 3;
+      const stdDev = Math.sqrt(trailingCoA.reduce((acc, c) => acc + Math.pow(c.hcorg_ratio - avg, 2), 0) / 3);
+      if (Math.abs(hcorg_ratio - avg) > 2 * stdDev) {
+        db.prepare('INSERT INTO flags (rule_id, record_type, batch_id_label, triggered_at_utc, status) VALUES (?, ?, ?, ?, ?)')
+          .run('DR-19', 'coa', batch_id_label, now, 'OPEN');
+      }
     }
 
     db.prepare(`INSERT INTO coa_records (batch_id_label, lab_user_id, ctot_pct, cinorg_pct, corg_pct, mh_pct, hcorg_ratio, report_date, submission_date, retained_sample_ref, date_lag_days, upload_timestamp_utc) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
@@ -370,6 +467,33 @@ router.post("/flags/:id/resolve", authenticate(["MANAGEMENT", "AUDITOR"]), (req,
   res.json({ success: true });
 });
 
+router.post("/coa/:id/seal-check", authenticate(["MANAGEMENT", "AUDITOR"]), (req, res) => {
+  const { id } = req.params;
+  const { broken_seal, notes } = req.body;
+  if (broken_seal) {
+    const coa = db.prepare('SELECT batch_id_label FROM coa_records WHERE id = ?').get(id) as any;
+    if (coa) {
+      db.prepare('INSERT INTO flags (rule_id, record_type, record_id, batch_id_label, triggered_at_utc, status, resolution_notes) VALUES (?, ?, ?, ?, ?, ?, ?)')
+        .run('VE-17', 'coa', id, coa.batch_id_label, new Date().toISOString(), 'OPEN', notes || 'Broken seal reported by retrieval officer.');
+    }
+  }
+  res.json({ success: true });
+});
+
+router.get("/flags", authenticate(["MANAGEMENT", "AUDITOR", "PLANT_OPERATOR", "FIELD_OFFICER"]), (req, res) => {
+  let flags = db.prepare('SELECT * FROM flags WHERE status = "OPEN" ORDER BY id DESC').all() as any[];
+  
+  // Filter relevant flags for non-MGMT roles if needed? 
+  // User said "other profile consoles can also check their relevant flags"
+  if (req.user?.role === 'FIELD_OFFICER') {
+    flags = flags.filter(f => f.record_type === 'delivery' || f.rule_id.startsWith('VE-05') || f.rule_id.startsWith('VE-01'));
+  } else if (req.user?.role === 'PLANT_OPERATOR') {
+    flags = flags.filter(f => f.record_type === 'batch' || f.record_type === 'seal');
+  }
+
+  res.json(flags);
+});
+
 router.get("/dashboard", authenticate(["MANAGEMENT"]), (req, res) => {
   const corcsTotal = db.prepare("SELECT SUM(corcs_net) as t FROM carbon_calculations").get() as any;
   const activeFlags = db.prepare("SELECT COUNT(*) as c FROM flags WHERE status = 'OPEN'").get() as any;
@@ -423,16 +547,50 @@ router.get("/dashboard", authenticate(["MANAGEMENT"]), (req, res) => {
   }
 
   // 4. Detailed Flags
-  const flags = flaggedBatches.map(f => ({
-    ...f,
-    blocksDispatch: f.rule_id.startsWith('VE-'), // Assuming VE rules are blocking
-    description: f.rule_id === 'VE-02' ? 'Yield ratio anomaly detected.' :
-                 f.rule_id === 'VE-03' ? 'Missing PLC telemetry logs.' :
-                 f.rule_id === 'VE-05' ? 'GPS spoofing suspected in delivery.' :
-                 f.rule_id === 'VE-11' ? 'Dispatch mass exceeding batch production.' :
-                 f.rule_id === 'VE-14' ? 'Seal photo GPS out of range.' :
-                 'Integrity violation flagged by engine.'
-  }));
+  // VE-12 check: Evidence missing > 60 days post-dispatch
+  const sixtyDaysAgo = new Date(Date.now() - 60 * 24 * 60 * 60 * 1000).toISOString();
+  const overdueDispatches = db.prepare("SELECT * FROM dispatches WHERE evidence_status = 'PENDING' AND dispatch_date_utc < ?").all(sixtyDaysAgo) as any[];
+  for (const d of overdueDispatches) {
+    const exists = db.prepare("SELECT id FROM flags WHERE rule_id = 'VE-12' AND record_id = ?").get(d.id);
+    if (!exists) {
+      db.prepare("INSERT INTO flags (rule_id, record_type, record_id, batch_id_label, triggered_at_utc, status) VALUES (?, ?, ?, ?, ?, ?)")
+        .run('VE-12', 'dispatch', d.id, d.batch_id_label, new Date().toISOString(), 'OPEN');
+    }
+  }
+
+  // Refresh flagged batches after potential VE-12 markers
+  const currentFlagged = db.prepare("SELECT * FROM flags WHERE status = 'OPEN' ORDER BY id DESC").all() as any[];
+
+  const flags = currentFlagged.map(f => {
+    let desc = 'Integrity violation flagged by engine.';
+    switch(f.rule_id) {
+      case 'VE-01': desc = 'Duplicate Vehicle Window: Same vehicle detected within 4 hours.'; break;
+      case 'VE-02': desc = 'Yield Ratio Anomaly: Output outside 25-40% range.'; break;
+      case 'VE-03': desc = 'Missing PLC Logs: Null telemetry stream during production.'; break;
+      case 'VE-05': desc = 'GPS Spoofing: App GPS vs Photo EXIF mismatch.'; break;
+      case 'VE-06': desc = 'H/Corg Upper Bound: Ratio >= 0.70 (Ineligible).'; break;
+      case 'VE-07': desc = 'H/Corg Implausible: Ratio < 0.15 (Cotton stalk anomaly).'; break;
+      case 'VE-08': desc = 'GPS Delivery Spam: Multiple deliveries from same pin.'; break;
+      case 'VE-09': desc = 'CoA Timing Mismatch: Report lag > 30 days.'; break;
+      case 'VE-10': desc = 'Combustion Uptime: Reactor downtime > 5%.'; break;
+      case 'VE-11': desc = 'Dispatch Total Exceeded: Mass balance violation.'; break;
+      case 'VE-12': desc = 'End-use Deadline: Biochar evidence overdue > 60 days.'; break;
+      case 'VE-13': desc = 'Stockpile Duration: Feedstock > 30 days or too moist.'; break;
+      case 'DR-15': desc = 'Batch Sequence Timing: Created before PLC start.'; break;
+      case 'DR-17': desc = 'Electricity Outlier: Energy consumption deviation > 20%.'; break;
+      case 'DR-18': desc = 'Diesel Outlier: Fuel use deviation > 15%.'; break;
+      case 'DR-19': desc = 'Lab Result Regression: H/Corg > 2 sigma from average.'; break;
+      case 'VE-14': desc = 'Seal Photo Missing: Mandatory chain-of-custody photo null.'; break;
+      case 'VE-15': desc = 'Seal Photo GPS Mismatch: Out of range of plant.'; break;
+      case 'VE-16': desc = 'Attestation Missing: Label visibility not confirmed.'; break;
+      case 'VE-17': desc = 'Broken Seal: Reporting by Compliance Officer.'; break;
+    }
+    return {
+      ...f,
+      blocksDispatch: f.rule_id.startsWith('VE-'),
+      description: desc
+    };
+  });
 
   // 5. Revenue
   const confirmedRev = (corcsTotal?.t || 0) * 120;

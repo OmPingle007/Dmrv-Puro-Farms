@@ -25,21 +25,40 @@ export default function PlantOperator() {
   const [showAddCertModal, setShowAddCertModal] = useState(false);
   
   // Data for Flags
-  const [validationFlags, setValidationFlags] = useState([
-    { id: 1, code: 'VE-01', type: 'Delivery', relId: '#21', batch: '#5', status: 'Open', desc: 'Duplicate vehicle within 4 hours', date: '09 May 2026, 06:48 pm' },
-    { id: 2, code: 'DQ-09', type: 'Dispatch', relId: '#2', batch: '#5', status: 'Open', desc: 'Dispatch price anomaly (< 50% of ₹20,000/t reference)', date: '09 May 2026, 06:48 pm' },
-    { id: 3, code: 'VE-12', type: 'Dispatch', relId: '#2', batch: '#5', status: 'Open', desc: 'End-use evidence overdue (60 days)', date: '09 May 2026, 06:48 pm' },
-  ]);
+  const [validationFlags, setValidationFlags] = useState<any[]>([]);
+
+  const fetchFlags = async () => {
+    try {
+      const res = await fetch("/api/flags", { headers: { Authorization: `Bearer ${token}` } });
+      if (res.ok) setValidationFlags(await res.json());
+    } catch (e) {}
+  };
+
+  const resolveFlag = async (id: number) => {
+    try {
+      const res = await fetch(`/api/flags/${id}/resolve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ status: 'RESOLVED' })
+      });
+      if (res.ok) fetchFlags();
+    } catch (e) {}
+  };
 
   // Data for Calibration
-  const [calibrations, setCalibrations] = useState([
-    { id: 1, name: 'Mettler Toledo Weighbridge', instId: 'WB-001', cert: 'NABL-WB-2025-0341', expiryStr: '31 Oct 2026', days: 171, status: 'Valid' },
-    { id: 2, name: 'Sartorius Bagging Scale', instId: 'BS-001', cert: 'NABL-BS-2025-0342', expiryStr: '15 May 2026', days: 2, status: 'Expiring Soon' },
-    { id: 3, name: 'Testo Moisture Analyser', instId: 'MA-001', cert: 'NABL-MA-2025-0343', expiryStr: '14 Apr 2026', days: -29, status: 'Expired' },
-    { id: 4, name: 'Thermocouple Array (Kiln)', instId: 'TC-001', cert: 'NABL-TC-2025-0344', expiryStr: '30 Nov 2026', days: 201, status: 'Valid' },
-  ]);
+  const [calibrations, setCalibrations] = useState<any[]>([]);
 
-  // Data for Dispatches
+  const fetchCalibrations = async () => {
+    try {
+      const res = await fetch("/api/dashboard", { headers: { Authorization: `Bearer ${token}` } });
+      if (res.ok) {
+        const d = await res.json();
+        setCalibrations(d.expiringCerts || []);
+      }
+    } catch (e) {}
+  };
+
+  // Restored States
   const [showNewDispatchModal, setShowNewDispatchModal] = useState(false);
   const [dispatchesData, setDispatchesData] = useState<any[]>([]);
   const [newDispatchForm, setNewDispatchForm] = useState({
@@ -51,7 +70,6 @@ export default function PlantOperator() {
   });
   const [dispatchError, setDispatchError] = useState('');
   
-  // Data State
   const [baggingWeight, setBaggingWeight] = useState<number | null>(null);
   const [dieselLitres, setDieselLitres] = useState<number | null>(null);
   const [plcData, setPlcData] = useState({ temp: 450, resTime: 45 });
@@ -60,11 +78,8 @@ export default function PlantOperator() {
   const [evidenceDispatchId, setEvidenceDispatchId] = useState<number | null>(null);
   const [photos, setPhotos] = useState<any>({});
   
-  // Form State
   const [newBatchForm, setNewBatchForm] = useState({ plant_code: "KLN-01", feedstock_lot_ids: [] as number[] });
   const [sealForm, setSealForm] = useState({ grabbed: false, sealed: false, batchIdVisible: false, retentionRef: '', error: '' });
-
-  const token = localStorage.getItem("token");
 
   const fetchDeliveries = async () => {
     try {
@@ -90,8 +105,12 @@ export default function PlantOperator() {
     if (currentTab === 'batches') {
       fetchBatches();
     } else if (currentTab === 'dispatches') {
-      fetchBatches(); // Keep batches updated for the dropdown
+      fetchBatches();
       fetchDispatches();
+    } else if (currentTab === 'flags') {
+      fetchFlags();
+    } else if (currentTab === 'calibration') {
+      fetchCalibrations();
     }
     fetchDeliveries();
   }, [currentTab]);
@@ -385,28 +404,32 @@ export default function PlantOperator() {
         </div>
 
         <div className="space-y-4">
-          {validationFlags.filter(f => flagTab === 'All' || (flagTab === 'OPEN' && f.status === 'Open') || (flagTab === 'RESOLVED' && f.status === 'Resolved')).map(flag => (
+          {validationFlags.filter(f => flagTab === 'All' || (flagTab === 'OPEN' && f.status === 'OPEN') || (flagTab === 'RESOLVED' && f.status === 'RESOLVED')).map(flag => (
             <div key={flag.id} className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex items-start justify-between">
               <div className="flex items-start">
                 <Flag className="text-[#f59e0b] mr-4 mt-1 flex-shrink-0" size={24} />
                 <div>
                   <div className="flex items-center space-x-3 mb-1">
-                    <span className="bg-orange-100 text-orange-800 text-xs font-semibold px-2 py-0.5 rounded border border-orange-200">{flag.code}</span>
-                    <span className="text-slate-600 text-sm font-medium">{flag.type} {flag.relId}</span>
-                    <span className="text-slate-500 text-sm">Batch {flag.batch}</span>
+                    <span className="bg-orange-100 text-orange-800 text-xs font-semibold px-2 py-0.5 rounded border border-orange-200">{flag.rule_id}</span>
+                    <span className="text-slate-600 text-sm font-medium">{flag.record_type} #{flag.record_id || flag.batch_id_label}</span>
                     <span className="bg-orange-100 text-orange-800 text-xs font-medium px-2 py-0.5 rounded-full">{flag.status}</span>
                   </div>
-                  <p className="text-slate-700 font-medium text-base mb-1">{flag.desc}</p>
-                  <p className="text-xs text-slate-500">{flag.date}</p>
+                  <p className="text-slate-700 font-medium text-base mb-1">{flag.resolution_notes || 'Integrity violation flagged by engine.'}</p>
+                  <p className="text-xs text-slate-500">{formatDate(flag.triggered_at_utc)}</p>
                 </div>
               </div>
-              <button className="flex items-center space-x-2 px-4 py-2 bg-white border border-slate-300 rounded-lg text-sm font-medium text-slate-700 hover:bg-slate-50 transition-colors">
-                <CheckCircle size={16} />
-                <span>Resolve</span>
-              </button>
+              {flag.status === 'OPEN' && (
+                <button 
+                  onClick={() => resolveFlag(flag.id)}
+                  className="flex items-center space-x-2 px-4 py-2 bg-white border border-slate-300 rounded-lg text-sm font-medium text-slate-700 hover:bg-slate-50 transition-colors"
+                >
+                  <CheckCircle size={16} />
+                  <span>Resolve</span>
+                </button>
+              )}
             </div>
           ))}
-          {validationFlags.filter(f => flagTab === 'All' || (flagTab === 'OPEN' && f.status === 'Open') || (flagTab === 'RESOLVED' && f.status === 'Resolved')).length === 0 && (
+          {validationFlags.filter(f => flagTab === 'All' || (flagTab === 'OPEN' && f.status === 'OPEN') || (flagTab === 'RESOLVED' && f.status === 'RESOLVED')).length === 0 && (
             <div className="bg-white p-8 rounded-xl border border-dashed border-slate-300 text-center text-slate-500">
               No flags found for this filter.
             </div>

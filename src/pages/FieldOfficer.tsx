@@ -7,6 +7,7 @@ export default function FieldOfficer() {
   const [farmers, setFarmers] = useState<any[]>([]);
   const [deliveries, setDeliveries] = useState<any[]>([]);
   const [dispatches, setDispatches] = useState<any[]>([]);
+  const [flags, setFlags] = useState<any[]>([]);
   const [msg, setMsg] = useState("");
   const [scaleWeight, setScaleWeight] = useState<number | null>(null);
   const [photoInfo, setPhotoInfo] = useState<{ url: string, ts: string, lat?: number, lng?: number } | null>(null);
@@ -29,7 +30,15 @@ export default function FieldOfficer() {
     fetchFarmers();
     fetchDeliveries();
     fetchDispatches();
+    fetchFlags();
   }, []);
+
+  const fetchFlags = async () => {
+    try {
+      const res = await fetch("/api/flags", { headers: { Authorization: `Bearer ${token}` } });
+      if (res.ok) setFlags(await res.json());
+    } catch(e) {}
+  };
 
   const fetchFarmers = async () => {
     const res = await fetch("/api/farmers", { headers: { Authorization: `Bearer ${token}` } });
@@ -323,6 +332,46 @@ export default function FieldOfficer() {
               ))}
               {dispatches.length === 0 && (
                 <div className="text-center p-8 text-slate-400 text-sm">No dispatches found.</div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {tab === 'flags' && (
+        <div className="flex-1 flex flex-col min-h-0 bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden text-sm">
+          <div className="p-4 md:p-6 border-b border-slate-200">
+            <h2 className="text-xl md:text-2xl font-bold text-slate-800">Quality & Integrity Flags</h2>
+            <p className="text-sm text-slate-500 mt-1">Issues requiring field investigation or operational correction</p>
+          </div>
+          <div className="flex-1 overflow-y-auto p-4 md:p-6 bg-slate-50">
+            <div className="space-y-4">
+              {flags.map(f => (
+                <div key={f.id} className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex items-start gap-4">
+                  <div className="p-2 bg-orange-50 text-orange-600 rounded-lg">
+                    <span className="text-lg">⚠️</span>
+                  </div>
+                  <div className="flex-1">
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className="bg-orange-100 text-orange-800 text-[10px] font-bold px-2 py-0.5 rounded border border-orange-200">{f.rule_id}</span>
+                      <span className="text-slate-500 text-xs">{new Date(f.triggered_at_utc).toLocaleString()}</span>
+                    </div>
+                    <p className="font-semibold text-slate-800 text-sm mb-1">
+                      {f.record_type === 'delivery' ? `Delivery Violation` : `Integrity Issue`}
+                    </p>
+                    <p className="text-slate-600 leading-relaxed">
+                      {f.rule_id === 'VE-05' ? 'GPS Spoofing Suspected: Device GPS and Photo EXIF differ significantly.' :
+                       f.rule_id === 'VE-01' ? 'Duplicate Vehicle: This vehicle registered another delivery within 4 hours.' :
+                       f.rule_id === 'VE-08' ? 'GPS Delivery Spam: More than 3 deliveries from this location today.' :
+                       f.resolution_notes || 'Requires field verification.'}
+                    </p>
+                  </div>
+                </div>
+              ))}
+              {flags.length === 0 && (
+                <div className="text-center p-12 bg-white rounded-xl border border-dashed border-slate-300 text-slate-400">
+                  No active flags to show.
+                </div>
               )}
             </div>
           </div>

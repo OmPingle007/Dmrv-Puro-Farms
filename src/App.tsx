@@ -146,6 +146,9 @@ function Layout() {
               <Link to="/field?tab=farmers" className={`flex items-center px-4 py-2.5 mx-2 mt-1 rounded-lg text-sm transition-colors ${tab === 'farmers' ? 'bg-[#18a058] text-white font-medium shadow-sm' : 'text-white/70 hover:bg-white/5'}`}>
                  <span className="mr-3">🧑‍🌾</span> Farmers
               </Link>
+              <Link to="/field?tab=flags" className={`flex items-center px-4 py-2.5 mx-2 mt-1 rounded-lg text-sm transition-colors ${tab === 'flags' ? 'bg-[#18a058] text-white font-medium shadow-sm' : 'text-white/70 hover:bg-white/5'}`}>
+                 <Flag size={16} className="mr-3" /> Flags
+              </Link>
             </>
           )}
           
