@@ -1,514 +1,582 @@
-import { Router } from "express";
-import jwt from "jsonwebtoken";
-import bcrypt from "bcryptjs";
-import db, { initDb, seedDb } from "./db.js";
-import crypto from "crypto";
+import { Router } from 'express';
+import jwt from 'jsonwebtoken';
+import bcrypt from 'bcryptjs';
+import { query, queryOne, execute, initDb, seedDb } from './db.js';
+import crypto from 'crypto';
+import { runCarbonEngine } from './carbonEngine.js';
 
 const router = Router();
-const JWT_SECRET = "supersecret_for_demo";
-
-// Initialize data
-initDb();
-seedDb();
+const JWT_SECRET = 'supersecret_for_demo';
 
 // JWT Middleware
-const authenticate = (roles: string[]) => (req: any, res: any, next: any) => {
-  const token = req.headers.authorization?.split(" ")[1];
-  if (!token) return res.status(401).json({ error: "No token provided" });
+const authenticate = (roles: string[]) => async (req: any, res: any, next: any) => {
+  const token = req.headers.authorization?.split(' ')[1];
+  if (!token) return res.status(401).json({ error: 'No token provided' });
   try {
     const decoded = jwt.verify(token, JWT_SECRET) as any;
     if (!roles.includes(decoded.role)) {
-      db.prepare('INSERT INTO fraud_events (rule_id, attempted_by_user_id, attempted_action, payload_snapshot, triggered_at_utc, ip_address) VALUES (?, ?, ?, ?, ?, ?)')
-        .run("ROLE_VIOLATION", decoded.id, req.method + " " + req.path, JSON.stringify(req.body), new Date().toISOString(), req.ip || "127.0.0.1");
-      return res.status(403).json({ error: "Access denied or UNAUTHORIZED" });
+      await execute(
+        'INSERT INTO fraud_events (rule_id, attempted_by_user_id, attempted_action, payload_snapshot, triggered_at_utc, ip_address) VALUES (?, ?, ?, ?, ?, ?)',
+        ['ROLE_VIOLATION', decoded.id, req.method + ' ' + req.path, JSON.stringify(req.body), new Date().toISOString(), req.ip || '127.0.0.1']
+      );
+      return res.status(403).json({ error: 'Access denied or UNAUTHORIZED' });
     }
     req.user = decoded;
     next();
   } catch (e) {
-    res.status(401).json({ error: "Invalid token" });
+    res.status(401).json({ error: 'Invalid token' });
   }
 };
 
-router.get("/batches/:id/trace", authenticate(["AUDITOR", "MANAGEMENT"]), (req, res) => {
+router.get('/batches/:id/trace', authenticate(['AUDITOR', 'MANAGEMENT']), async (req: any, res: any) => {
   const { id } = req.params;
-  const batch = db.prepare('SELECT * FROM batches WHERE id = ?').get(id) as any;
-  if (!batch) return res.status(404).json({ error: "Batch not found" });
+  const batch = await queryOne('SELECT * FROM batches WHERE id = ?', [id]);
+  if (!batch) return res.status(404).json({ error: 'Batch not found' });
 
-  let deliveries = [];
+  let deliveries: any[] = [];
   try {
-    const lotIds = JSON.parse(batch.feedstock_lot_ids || "[]");
+    const lotIds = JSON.parse(batch.feedstock_lot_ids || '[]');
     if (lotIds.length > 0) {
       const placeholders = lotIds.map(() => '?').join(',');
-      deliveries = db.prepare(`SELECT d.*, f.land_document_url, f.noc_document_url, f.full_name as farmer_name FROM deliveries d LEFT JOIN farmers f ON d.farmer_id = f.id WHERE d.id IN (${placeholders})`).all(...lotIds);
+      deliveries = await query(
+        `SELECT d.*, f.land_document_url, f.noc_document_url, f.full_name as farmer_name FROM deliveries d LEFT JOIN farmers f ON d.farmer_id = f.id WHERE d.id IN (${placeholders})`,
+        lotIds
+      );
     }
-  } catch(e) {}
+  } catch (e) {}
 
-  const plcLogs = db.prepare('SELECT * FROM plc_logs WHERE batch_id_label = ? ORDER BY timestamp_utc ASC').all(batch.batch_id_label);
-  const coa = db.prepare('SELECT * FROM coa_records WHERE batch_id_label = ?').get(batch.batch_id_label);
-  const carbon = db.prepare('SELECT * FROM carbon_calculations WHERE batch_id_label = ?').get(batch.batch_id_label);
-  const flags = db.prepare('SELECT * FROM flags WHERE batch_id_label = ?').all(batch.batch_id_label);
-  const dispatches = db.prepare('SELECT * FROM dispatches WHERE batch_id_label = ?').all(batch.batch_id_label);
+  const plcLogs = await query('SELECT * FROM plc_logs WHERE batch_id_label = ? ORDER BY timestamp_utc ASC', [batch.batch_id_label]);
+  const coa = await queryOne('SELECT * FROM coa_records WHERE batch_id_label = ?', [batch.batch_id_label]);
+  const carbon = await queryOne('SELECT * FROM carbon_calculations WHERE batch_id_label = ?', [batch.batch_id_label]);
+  const flags = await query('SELECT * FROM flags WHERE batch_id_label = ?', [batch.batch_id_label]);
+  const dispatches = await query('SELECT * FROM dispatches WHERE batch_id_label = ?', [batch.batch_id_label]);
 
   res.json({ batch, deliveries, plcLogs, coa, carbon, flags, dispatches });
 });
 
-router.post("/batches/:id/verify_hash", authenticate(["AUDITOR", "MANAGEMENT"]), (req, res) => {
+router.post('/batches/:id/verify_hash', authenticate(['AUDITOR', 'MANAGEMENT']), async (req: any, res: any) => {
   const { id } = req.params;
-  const batch = db.prepare('SELECT * FROM batches WHERE id = ?').get(id) as any;
-  if (!batch) return res.status(404).json({ error: "Batch not found" });
+  const batch = await queryOne('SELECT * FROM batches WHERE id = ?', [id]);
+  if (!batch) return res.status(404).json({ error: 'Batch not found' });
 
   try {
-    const lotIds = JSON.parse(batch.feedstock_lot_ids || "[]");
+    const lotIds = JSON.parse(batch.feedstock_lot_ids || '[]');
     const record_hash_calc = crypto.createHash('sha256').update(batch.batch_id_label + JSON.stringify(lotIds) + batch.previous_batch_hash).digest('hex');
-    
+
     if (record_hash_calc === batch.record_hash) {
-      res.json({ status: "VERIFIED", hash: record_hash_calc });
+      res.json({ status: 'VERIFIED', hash: record_hash_calc });
     } else {
-      res.json({ status: "TAMPERED", expected: batch.record_hash, actual: record_hash_calc });
+      res.json({ status: 'TAMPERED', expected: batch.record_hash, actual: record_hash_calc });
     }
   } catch (e) {
-    res.status(500).json({ error: "Verification failed" });
+    res.status(500).json({ error: 'Verification failed' });
   }
 });
 
-router.post("/batches/:id/ncr", authenticate(["AUDITOR"]), (req, res) => {
+router.post('/batches/:id/ncr', authenticate(['AUDITOR']), async (req: any, res: any) => {
   const { id } = req.params;
   const { field, description } = req.body;
-  const batch = db.prepare('SELECT batch_id_label FROM batches WHERE id = ?').get(id) as any;
-  if (!batch) return res.status(404).json({ error: "Batch not found" });
+  const batch = await queryOne('SELECT batch_id_label FROM batches WHERE id = ?', [id]);
+  if (!batch) return res.status(404).json({ error: 'Batch not found' });
 
-  const result = db.prepare('INSERT INTO flags (rule_id, record_type, record_id, batch_id_label, triggered_at_utc, status, resolution_notes) VALUES (?, ?, ?, ?, ?, ?, ?)')
-    .run('AUDIT-NCR', field, id, batch.batch_id_label, new Date().toISOString(), 'OPEN', description);
-  
-  res.json({ message: "NCR raised successfully", id: result.lastInsertRowid });
+  const result = await execute(
+    'INSERT INTO flags (rule_id, record_type, record_id, batch_id_label, triggered_at_utc, status, resolution_notes) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    ['AUDIT-NCR', field, id, batch.batch_id_label, new Date().toISOString(), 'OPEN', description]
+  );
+
+  res.json({ message: 'NCR raised successfully', id: result.insertId });
 });
 
-router.post("/auth/login", (req, res) => {
+router.post('/auth/login', async (req: any, res: any) => {
   const { email, password } = req.body;
-  const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email) as any;
+  const user = await queryOne('SELECT * FROM users WHERE email = ?', [email]);
   if (!user || !bcrypt.compareSync(password, user.password_hash)) {
-    return res.status(401).json({ error: "Invalid credentials" });
+    return res.status(401).json({ error: 'Invalid credentials' });
   }
   const token = jwt.sign({ id: user.id, email: user.email, role: user.role }, JWT_SECRET, { expiresIn: '24h' });
   res.json({ token, role: user.role, email: user.email });
 });
 
-// Add these imports at the top
-import { runCarbonEngine } from "./carbonEngine.js";
-
 // Registration (Field Officer)
-router.post("/farmers", authenticate(["FIELD_OFFICER"]), (req: any, res: any) => {
+router.post('/farmers', authenticate(['FIELD_OFFICER']), async (req: any, res: any) => {
   const { full_name, village, fpo_id, aadhaar, gps_lat, gps_lng, land_document_url, noc_document_url } = req.body;
   const aadhaarHash = crypto.createHash('sha256').update(aadhaar).digest('hex');
 
-  const existing = db.prepare('SELECT id FROM farmers WHERE aadhaar_hash = ?').get(aadhaarHash);
+  const existing = await queryOne('SELECT id FROM farmers WHERE aadhaar_hash = ?', [aadhaarHash]);
   if (existing) {
-    db.prepare('INSERT INTO fraud_events (rule_id, attempted_by_user_id, attempted_action, triggered_at_utc) VALUES (?, ?, ?, ?)')
-      .run("VE-02_PHANTOM_FARMER", req.user.id, "REGISTER_FARMER", new Date().toISOString());
-    return res.status(409).json({ error: "Duplicate Aadhaar — registration rejected." });
+    await execute(
+      'INSERT INTO fraud_events (rule_id, attempted_by_user_id, attempted_action, triggered_at_utc) VALUES (?, ?, ?, ?)',
+      ['VE-02_PHANTOM_FARMER', req.user.id, 'REGISTER_FARMER', new Date().toISOString()]
+    );
+    return res.status(409).json({ error: 'Duplicate Aadhaar — registration rejected.' });
   }
 
-  // Random 10% flag
   const flagged = Math.random() < 0.1 ? 1 : 0;
-  
-  const result = db.prepare(`INSERT INTO farmers (full_name, village, fpo_id, aadhaar_hash, gps_lat, gps_lng, verification_status, registered_at_utc, flagged_for_call_verification, land_document_url, noc_document_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-    .run(full_name, village, fpo_id, aadhaarHash, gps_lat, gps_lng, flagged ? 'PENDING' : 'VERIFIED', new Date().toISOString(), flagged, land_document_url || null, noc_document_url || null);
-  
-  res.json({ id: result.lastInsertRowid, status: flagged ? 'PENDING' : 'VERIFIED' });
+
+  const result = await execute(
+    'INSERT INTO farmers (full_name, village, fpo_id, aadhaar_hash, gps_lat, gps_lng, verification_status, registered_at_utc, flagged_for_call_verification, land_document_url, noc_document_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    [full_name, village, fpo_id, aadhaarHash, gps_lat, gps_lng, flagged ? 'PENDING' : 'VERIFIED', new Date().toISOString(), flagged, land_document_url || null, noc_document_url || null]
+  );
+
+  res.json({ id: result.insertId, status: flagged ? 'PENDING' : 'VERIFIED' });
 });
 
 // Scale APIs
-router.get("/scales/weighbridge", authenticate(["FIELD_OFFICER"]), (req: any, res: any) => {
+router.get('/scales/weighbridge', authenticate(['FIELD_OFFICER']), (req: any, res: any) => {
   const weight = +(Math.random() * 6 + 2).toFixed(2);
   res.json({ instrument_id: 'WB-01', weight_t: weight, timestamp_utc: new Date().toISOString() });
 });
 
-router.get("/scales/bagging", authenticate(["PLANT_OPERATOR"]), (req: any, res: any) => {
+router.get('/scales/bagging', authenticate(['PLANT_OPERATOR']), (req: any, res: any) => {
   const weight = +(Math.random() * 3 + 1).toFixed(2);
   res.json({ instrument_id: 'BS-01', weight_t: weight, timestamp_utc: new Date().toISOString() });
 });
 
-router.get("/sensors/fuel", authenticate(["PLANT_OPERATOR"]), (req: any, res: any) => {
-  const fuel = +(Math.random() * 5 + 10).toFixed(1); // 10-15 L
+router.get('/sensors/fuel', authenticate(['PLANT_OPERATOR']), (req: any, res: any) => {
+  const fuel = +(Math.random() * 5 + 10).toFixed(1);
   res.json({ instrument_id: 'FM-01', fuel_litres: fuel, timestamp_utc: new Date().toISOString() });
 });
 
-// Deliveries (Field Officer)
-router.get("/deliveries", authenticate(["FIELD_OFFICER", "PLANT_OPERATOR", "MANAGEMENT", "AUDITOR"]), (req, res) => {
-  const deliveries = db.prepare(`
-    SELECT d.*, f.full_name, f.village 
-    FROM deliveries d 
-    JOIN farmers f ON d.farmer_id = f.id 
+// Deliveries
+router.get('/deliveries', authenticate(['FIELD_OFFICER', 'PLANT_OPERATOR', 'MANAGEMENT', 'AUDITOR']), async (req: any, res: any) => {
+  const deliveries = await query(`
+    SELECT d.*, f.full_name, f.village
+    FROM deliveries d
+    JOIN farmers f ON d.farmer_id = f.id
     ORDER BY d.id DESC
-  `).all();
+  `);
   res.json(deliveries);
 });
 
-router.post("/deliveries", authenticate(["FIELD_OFFICER"]), (req, res) => {
+router.post('/deliveries', authenticate(['FIELD_OFFICER']), async (req: any, res: any) => {
   const { farmer_id, vehicle_number, wet_mass_tonnes, moisture_1, moisture_2, moisture_3, gps_lat, gps_lng, photo_exif_lat, photo_exif_lng, photo_url, moisture_photo_url, client_timestamp_claimed } = req.body;
-  
+
   const moisture_avg = (moisture_1 + moisture_2 + moisture_3) / 3;
-  
+
   const now = new Date().toISOString();
-  // DR-14: Delivery Fingerprint
   const dateStr = now.split('T')[0];
   const massRounded = Math.round(wet_mass_tonnes);
-  const fingerprint = crypto.createHash('sha256').update(`${farmer_id}_${Math.round(gps_lat*1000)}_${dateStr}_${massRounded}`).digest('hex');
-  
-  // VE-01: Duplicate Vehicle Window (same vehicle + date within 4 hours)
+  const fingerprint = crypto.createHash('sha256').update(`${farmer_id}_${Math.round(gps_lat * 1000)}_${dateStr}_${massRounded}`).digest('hex');
+
+  // VE-01: Duplicate Vehicle Window
   const fourHoursAgo = new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString();
-  const duplicateVehicle = db.prepare('SELECT id FROM deliveries WHERE vehicle_number = ? AND server_timestamp_utc > ?').get(vehicle_number, fourHoursAgo);
-  
-  // VE-08: GPS Delivery Spam (>3 deliveries from same GPS pin +-100m in one day)
+  const duplicateVehicle = await queryOne('SELECT id FROM deliveries WHERE vehicle_number = ? AND server_timestamp_utc > ?', [vehicle_number, fourHoursAgo]);
+
+  // VE-08: GPS Delivery Spam
   const today = dateStr + '%';
-  const sameGpsDeliveries = db.prepare(`
-    SELECT COUNT(*) as c FROM deliveries 
-    WHERE ABS(gps_lat - ?) < 0.001 AND ABS(gps_lng - ?) < 0.001 
-    AND server_timestamp_utc LIKE ?
-  `).get(gps_lat, gps_lng, today) as any;
+  const sameGpsRows = await query<{ c: number }>(
+    'SELECT COUNT(*) as c FROM deliveries WHERE ABS(gps_lat - ?) < 0.001 AND ABS(gps_lng - ?) < 0.001 AND server_timestamp_utc LIKE ?',
+    [gps_lat, gps_lng, today]
+  );
+  const sameGpsDeliveries = sameGpsRows[0];
 
   try {
-    const result = db.prepare(`INSERT INTO deliveries (farmer_id, vehicle_number, wet_mass_tonnes, moisture_1, moisture_2, moisture_3, moisture_avg, gps_lat, gps_lng, photo_exif_lat, photo_exif_lng, photo_url, moisture_photo_url, client_timestamp_claimed, delivery_fingerprint, server_timestamp_utc, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(farmer_id, vehicle_number, wet_mass_tonnes, moisture_1, moisture_2, moisture_3, moisture_avg, gps_lat, gps_lng, photo_exif_lat, photo_exif_lng, photo_url || null, moisture_photo_url || null, client_timestamp_claimed || now, fingerprint, now, "ACCEPTED");
-    
+    const result = await execute(
+      'INSERT INTO deliveries (farmer_id, vehicle_number, wet_mass_tonnes, moisture_1, moisture_2, moisture_3, moisture_avg, gps_lat, gps_lng, photo_exif_lat, photo_exif_lng, photo_url, moisture_photo_url, client_timestamp_claimed, delivery_fingerprint, server_timestamp_utc, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [farmer_id, vehicle_number, wet_mass_tonnes, moisture_1, moisture_2, moisture_3, moisture_avg, gps_lat, gps_lng, photo_exif_lat, photo_exif_lng, photo_url || null, moisture_photo_url || null, client_timestamp_claimed || now, fingerprint, now, 'ACCEPTED']
+    );
+
     if (duplicateVehicle) {
-      db.prepare('INSERT INTO flags (rule_id, record_type, record_id, triggered_at_utc, status) VALUES (?, ?, ?, ?, ?)')
-        .run("VE-01", 'delivery', result.lastInsertRowid, now, "OPEN");
+      await execute(
+        'INSERT INTO flags (rule_id, record_type, record_id, triggered_at_utc, status) VALUES (?, ?, ?, ?, ?)',
+        ['VE-01', 'delivery', result.insertId, now, 'OPEN']
+      );
     }
 
     if (sameGpsDeliveries.c >= 3) {
-      db.prepare('INSERT INTO flags (rule_id, record_type, record_id, triggered_at_utc, status) VALUES (?, ?, ?, ?, ?)')
-        .run("VE-08", 'delivery', result.lastInsertRowid, now, "OPEN");
+      await execute(
+        'INSERT INTO flags (rule_id, record_type, record_id, triggered_at_utc, status) VALUES (?, ?, ?, ?, ?)',
+        ['VE-08', 'delivery', result.insertId, now, 'OPEN']
+      );
     }
 
     // GPS spoof check VE-05
     const dist = Math.sqrt(Math.pow(gps_lat - photo_exif_lat, 2) + Math.pow(gps_lng - photo_exif_lng, 2)) * 111000;
     if (dist > 500) {
-      db.prepare('INSERT INTO flags (rule_id, record_type, record_id, triggered_at_utc, status) VALUES (?, ?, ?, ?, ?)')
-        .run("VE-05", 'delivery', result.lastInsertRowid, now, "OPEN");
+      await execute(
+        'INSERT INTO flags (rule_id, record_type, record_id, triggered_at_utc, status) VALUES (?, ?, ?, ?, ?)',
+        ['VE-05', 'delivery', result.insertId, now, 'OPEN']
+      );
     }
 
-    res.json({ id: result.lastInsertRowid, message: "Delivery recorded" });
+    res.json({ id: result.insertId, message: 'Delivery recorded' });
   } catch (e: any) {
-    if (e.message.includes("UNIQUE constraint failed")) {
-      return res.status(409).json({ error: "FINGERPRINT_DUPLICATE" });
+    if (e.message && e.message.includes('Duplicate entry') || (e.code && e.code === 'ER_DUP_ENTRY')) {
+      return res.status(409).json({ error: 'FINGERPRINT_DUPLICATE' });
     }
     res.status(500).json({ error: e.message });
   }
 });
 
 // Batches (Operator)
-router.post("/batches", authenticate(["PLANT_OPERATOR"]), (req, res) => {
+router.post('/batches', authenticate(['PLANT_OPERATOR']), async (req: any, res: any) => {
   const { feedstock_lot_ids, plant_code } = req.body;
-  const seq = db.prepare('SELECT COUNT(*) as c FROM batches').get() as { c: number };
+  const seqRows = await query<{ c: number }>('SELECT COUNT(*) as c FROM batches');
+  const seq = seqRows[0];
   const batch_id_label = `${plant_code}-FY26-${String(seq.c + 1).padStart(3, '0')}`;
-  
+
   const now = new Date().toISOString();
-  
+
   // Previous hash logic
-  const prevBatch = db.prepare('SELECT record_hash FROM batches ORDER BY id DESC LIMIT 1').get() as any;
+  const prevBatch = await queryOne('SELECT record_hash FROM batches ORDER BY id DESC LIMIT 1');
   const previous_batch_hash = prevBatch ? prevBatch.record_hash : null;
 
-  // Compute this batch hash
   const record_hash = crypto.createHash('sha256').update(batch_id_label + JSON.stringify(feedstock_lot_ids) + previous_batch_hash).digest('hex');
 
-  // DR-15: Batch Sequence Timing (Batch creation before PLC reactor start)
-  const lastPlcLog = db.prepare('SELECT timestamp_utc FROM plc_logs ORDER BY id DESC LIMIT 1').get() as any;
+  // DR-15: Batch Sequence Timing
+  const lastPlcLog = await queryOne('SELECT timestamp_utc FROM plc_logs ORDER BY id DESC LIMIT 1');
   if (lastPlcLog && new Date(now).getTime() < new Date(lastPlcLog.timestamp_utc).getTime()) {
-    db.prepare('INSERT INTO flags (rule_id, record_type, batch_id_label, triggered_at_utc, status) VALUES (?, ?, ?, ?, ?)')
-      .run('DR-15', 'batch', batch_id_label, now, 'OPEN');
+    await execute(
+      'INSERT INTO flags (rule_id, record_type, batch_id_label, triggered_at_utc, status) VALUES (?, ?, ?, ?, ?)',
+      ['DR-15', 'batch', batch_id_label, now, 'OPEN']
+    );
   }
 
-  // VE-13: Stockpile Duration (Intake to production > 30 days or moisture > 30%)
+  // VE-13: Stockpile Duration
   if (feedstock_lot_ids && feedstock_lot_ids.length > 0) {
     const placeholders = feedstock_lot_ids.map(() => '?').join(',');
-    const lots = db.prepare(`SELECT server_timestamp_utc, moisture_avg FROM deliveries WHERE id IN (${placeholders})`).all(...feedstock_lot_ids) as any[];
-    
-    const tooOld = lots.some(l => (new Date(now).getTime() - new Date(l.server_timestamp_utc).getTime()) > 30 * 24 * 60 * 60 * 1000);
-    const tooMoist = lots.some(l => l.moisture_avg > 30);
-    
+    const lots = await query(`SELECT server_timestamp_utc, moisture_avg FROM deliveries WHERE id IN (${placeholders})`, feedstock_lot_ids);
+
+    const tooOld = lots.some((l: any) => (new Date(now).getTime() - new Date(l.server_timestamp_utc).getTime()) > 30 * 24 * 60 * 60 * 1000);
+    const tooMoist = lots.some((l: any) => l.moisture_avg > 30);
+
     if (tooOld || tooMoist) {
-      db.prepare('INSERT INTO flags (rule_id, record_type, batch_id_label, triggered_at_utc, status) VALUES (?, ?, ?, ?, ?)')
-        .run('VE-13', 'batch', batch_id_label, now, 'OPEN');
+      await execute(
+        'INSERT INTO flags (rule_id, record_type, batch_id_label, triggered_at_utc, status) VALUES (?, ?, ?, ?, ?)',
+        ['VE-13', 'batch', batch_id_label, now, 'OPEN']
+      );
     }
   }
 
-  const result = db.prepare(`INSERT INTO batches (batch_id_label, plant_code, feedstock_lot_ids, status, record_hash, previous_batch_hash, created_at_utc) VALUES (?, ?, ?, ?, ?, ?, ?)`)
-    .run(batch_id_label, plant_code, JSON.stringify(feedstock_lot_ids), 'OPEN', record_hash, previous_batch_hash, now);
+  const result = await execute(
+    'INSERT INTO batches (batch_id_label, plant_code, feedstock_lot_ids, status, record_hash, previous_batch_hash, created_at_utc) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    [batch_id_label, plant_code, JSON.stringify(feedstock_lot_ids), 'OPEN', record_hash, previous_batch_hash, now]
+  );
 
   if (feedstock_lot_ids && feedstock_lot_ids.length > 0) {
     const placeholders = feedstock_lot_ids.map(() => '?').join(',');
-    db.prepare(`UPDATE deliveries SET batch_id = ? WHERE id IN (${placeholders})`)
-      .run(batch_id_label, ...feedstock_lot_ids);
+    await execute(
+      `UPDATE deliveries SET batch_id = ? WHERE id IN (${placeholders})`,
+      [batch_id_label, ...feedstock_lot_ids]
+    );
   }
 
   // Simulate IoT PLC stream
-  db.prepare(`INSERT INTO plc_logs (batch_id_label, sensor_id, timestamp_utc, temperature_c, residence_time_min, quality_flag) VALUES (?, ?, ?, ?, ?, ?)`)
-    .run(batch_id_label, 'TS-01', now, 520, 45, 'OK');
+  await execute(
+    'INSERT INTO plc_logs (batch_id_label, sensor_id, timestamp_utc, temperature_c, residence_time_min, quality_flag) VALUES (?, ?, ?, ?, ?, ?)',
+    [batch_id_label, 'TS-01', now, 520, 45, 'OK']
+  );
 
-  res.json({ id: result.lastInsertRowid, batch_id_label });
+  res.json({ id: result.insertId, batch_id_label });
 });
 
-router.post("/batches/:id/finalize", authenticate(["PLANT_OPERATOR"]), (req, res) => {
+router.post('/batches/:id/finalize', authenticate(['PLANT_OPERATOR']), async (req: any, res: any) => {
   const { id } = req.params;
   const { wet_output_mass, moisture_1, moisture_2, moisture_3, ph, bulk_density_kg_m3, diesel_litres } = req.body;
-  
-  const batch = db.prepare('SELECT * FROM batches WHERE id = ?').get(id) as any;
-  if (!batch || batch.status !== 'OPEN') return res.status(400).json({ error: "Invalid batch state" });
 
-  const plcLogs = db.prepare('SELECT COUNT(*) as c FROM plc_logs WHERE batch_id_label = ?').get(batch.batch_id_label) as any;
+  const batch = await queryOne('SELECT * FROM batches WHERE id = ?', [id]);
+  if (!batch || batch.status !== 'OPEN') return res.status(400).json({ error: 'Invalid batch state' });
+
+  const plcRows = await query<{ c: number }>('SELECT COUNT(*) as c FROM plc_logs WHERE batch_id_label = ?', [batch.batch_id_label]);
+  const plcLogs = plcRows[0];
   if (!plcLogs || plcLogs.c === 0) {
-    db.prepare('INSERT INTO flags (rule_id, record_type, record_id, batch_id_label, triggered_at_utc, status) VALUES (?, ?, ?, ?, ?, ?)')
-      .run('VE-03', 'batch', id, batch.batch_id_label, new Date().toISOString(), 'OPEN');
-    return res.status(400).json({ error: "VE-03: Missing PLC telemetry logs for this batch." });
+    await execute(
+      'INSERT INTO flags (rule_id, record_type, record_id, batch_id_label, triggered_at_utc, status) VALUES (?, ?, ?, ?, ?, ?)',
+      ['VE-03', 'batch', id, batch.batch_id_label, new Date().toISOString(), 'OPEN']
+    );
+    return res.status(400).json({ error: 'VE-03: Missing PLC telemetry logs for this batch.' });
   }
 
   const output_moisture_avg = (moisture_1 + moisture_2 + moisture_3) / 3;
   const qbiochar_dry = wet_output_mass * (1 - (output_moisture_avg / 100));
 
-  // Simulating input mass for yield ratio
-  const input_mass = qbiochar_dry * (1 / (0.3 + (Math.random() * 0.1))); // approx 30-40% yield
-  let yield_ratio = qbiochar_dry / input_mass;
+  const input_mass = qbiochar_dry * (1 / (0.3 + (Math.random() * 0.1)));
+  const yield_ratio = qbiochar_dry / input_mass;
 
   // VE-02: Yield ratio
-  let status = 'PRODUCTION_COMPLETE';
+  const status = 'PRODUCTION_COMPLETE';
   if (yield_ratio < 0.25 || yield_ratio > 0.40) {
-    db.prepare('INSERT INTO flags (rule_id, record_type, record_id, batch_id_label, triggered_at_utc, status) VALUES (?, ?, ?, ?, ?, ?)')
-      .run('VE-02', 'batch', id, batch.batch_id_label, new Date().toISOString(), 'OPEN');
+    await execute(
+      'INSERT INTO flags (rule_id, record_type, record_id, batch_id_label, triggered_at_utc, status) VALUES (?, ?, ?, ?, ?, ?)',
+      ['VE-02', 'batch', id, batch.batch_id_label, new Date().toISOString(), 'OPEN']
+    );
   }
 
-  // VE-10: Combustion Uptime (simulated check)
-  const downtimeEvents = db.prepare("SELECT COUNT(*) as c FROM plc_logs WHERE batch_id_label = ? AND quality_flag = 'DOWNTIME'").get(batch.batch_id_label) as any;
-  if (downtimeEvents.c > 5) { // Threshold for 95% uptime simulation
-    db.prepare('INSERT INTO flags (rule_id, record_type, record_id, batch_id_label, triggered_at_utc, status) VALUES (?, ?, ?, ?, ?, ?)')
-      .run('VE-10', 'batch', id, batch.batch_id_label, new Date().toISOString(), 'OPEN');
+  // VE-10: Combustion Uptime
+  const downtimeRows = await query<{ c: number }>("SELECT COUNT(*) as c FROM plc_logs WHERE batch_id_label = ? AND quality_flag = 'DOWNTIME'", [batch.batch_id_label]);
+  const downtimeEvents = downtimeRows[0];
+  if (downtimeEvents.c > 5) {
+    await execute(
+      'INSERT INTO flags (rule_id, record_type, record_id, batch_id_label, triggered_at_utc, status) VALUES (?, ?, ?, ?, ?, ?)',
+      ['VE-10', 'batch', id, batch.batch_id_label, new Date().toISOString(), 'OPEN']
+    );
   }
 
-  // DR-17: Electricity Outlier (Monthly electricity deviates >20% vs batch count - mocked)
+  // DR-17: Electricity Outlier
   if (Math.random() > 0.95) {
-    db.prepare('INSERT INTO flags (rule_id, record_type, record_id, batch_id_label, triggered_at_utc, status) VALUES (?, ?, ?, ?, ?, ?)')
-      .run('DR-17', 'electricity', id, batch.batch_id_label, new Date().toISOString(), 'OPEN');
+    await execute(
+      'INSERT INTO flags (rule_id, record_type, record_id, batch_id_label, triggered_at_utc, status) VALUES (?, ?, ?, ?, ?, ?)',
+      ['DR-17', 'electricity', id, batch.batch_id_label, new Date().toISOString(), 'OPEN']
+    );
   }
 
-  // DR-18: Diesel Outlier (Batch diesel consumption deviates >15% vs plant avg)
-  const avgDiesel = db.prepare('SELECT AVG(diesel_litres) as a FROM batches WHERE plant_code = ?').get(batch.plant_code) as any;
+  // DR-18: Diesel Outlier
+  const avgDieselRows = await query<{ a: number | null }>('SELECT AVG(diesel_litres) as a FROM batches WHERE plant_code = ?', [batch.plant_code]);
+  const avgDiesel = avgDieselRows[0];
   if (avgDiesel.a && Math.abs(diesel_litres - avgDiesel.a) / avgDiesel.a > 0.15) {
-    db.prepare('INSERT INTO flags (rule_id, record_type, record_id, batch_id_label, triggered_at_utc, status) VALUES (?, ?, ?, ?, ?, ?)')
-      .run('DR-18', 'diesel', id, batch.batch_id_label, new Date().toISOString(), 'OPEN');
+    await execute(
+      'INSERT INTO flags (rule_id, record_type, record_id, batch_id_label, triggered_at_utc, status) VALUES (?, ?, ?, ?, ?, ?)',
+      ['DR-18', 'diesel', id, batch.batch_id_label, new Date().toISOString(), 'OPEN']
+    );
   }
 
-  db.prepare(`UPDATE batches SET status=?, wet_output_mass=?, output_moisture_avg=?, qbiochar_dry=?, yield_ratio=?, ph=?, bulk_density_kg_m3=?, diesel_litres=?, updated_at_utc=? WHERE id=?`)
-    .run(status, wet_output_mass, output_moisture_avg, qbiochar_dry, yield_ratio, ph, bulk_density_kg_m3, diesel_litres, new Date().toISOString(), id);
-  
-  res.json({ message: "Production finalized", yield_ratio });
+  await execute(
+    'UPDATE batches SET status=?, wet_output_mass=?, output_moisture_avg=?, qbiochar_dry=?, yield_ratio=?, ph=?, bulk_density_kg_m3=?, diesel_litres=?, updated_at_utc=? WHERE id=?',
+    [status, wet_output_mass, output_moisture_avg, qbiochar_dry, yield_ratio, ph, bulk_density_kg_m3, diesel_litres, new Date().toISOString(), id]
+  );
+
+  res.json({ message: 'Production finalized', yield_ratio });
 });
 
 // Seal sample
-router.post("/batches/:id/seal-sample", authenticate(["PLANT_OPERATOR"]), (req, res) => {
+router.post('/batches/:id/seal-sample', authenticate(['PLANT_OPERATOR']), async (req: any, res: any) => {
   const { id } = req.params;
   const { retention_ref, photo_url, lat, lng } = req.body;
-  const batch = db.prepare('SELECT * FROM batches WHERE id = ?').get(id) as any;
-  if (!batch || batch.status !== 'PRODUCTION_COMPLETE') return res.status(400).json({ error: "Batch must be PRODUCTION_COMPLETE" });
-  
+  const batch = await queryOne('SELECT * FROM batches WHERE id = ?', [id]);
+  if (!batch || batch.status !== 'PRODUCTION_COMPLETE') return res.status(400).json({ error: 'Batch must be PRODUCTION_COMPLETE' });
+
   if (!retention_ref || !photo_url) {
-    return res.status(400).json({ error: "Missing required seal data" });
+    return res.status(400).json({ error: 'Missing required seal data' });
   }
 
   // VE-14/15/16: Seal Checks
   if (!photo_url) {
-    db.prepare('INSERT INTO flags (rule_id, record_type, batch_id_label, triggered_at_utc, status) VALUES (?, ?, ?, ?, ?)')
-      .run('VE-14', 'seal', batch.batch_id_label, new Date().toISOString(), 'OPEN');
-    return res.status(400).json({ error: "VE-14: Seal Photo Missing - Blocked" });
+    await execute(
+      'INSERT INTO flags (rule_id, record_type, batch_id_label, triggered_at_utc, status) VALUES (?, ?, ?, ?, ?)',
+      ['VE-14', 'seal', batch.batch_id_label, new Date().toISOString(), 'OPEN']
+    );
+    return res.status(400).json({ error: 'VE-14: Seal Photo Missing - Blocked' });
   }
 
-  // VE-15: Seal Photo GPS Mismatch (dist > 200m)
+  // VE-15: Seal Photo GPS Mismatch
   if (lat && lng) {
     const mockPlantLat = 20.93;
     const mockPlantLng = 77.75;
     const dist = Math.sqrt(Math.pow(lat - mockPlantLat, 2) + Math.pow(lng - mockPlantLng, 2)) * 111000;
     if (dist > 200) {
-       db.prepare('INSERT INTO flags (rule_id, record_type, batch_id_label, triggered_at_utc, status) VALUES (?, ?, ?, ?, ?)')
-        .run('VE-15', 'seal', batch.batch_id_label, new Date().toISOString(), 'OPEN');
+      await execute(
+        'INSERT INTO flags (rule_id, record_type, batch_id_label, triggered_at_utc, status) VALUES (?, ?, ?, ?, ?)',
+        ['VE-15', 'seal', batch.batch_id_label, new Date().toISOString(), 'OPEN']
+      );
     }
   }
 
   // VE-16: Batch ID Visibility Attestation Missing
   if (!req.body.attestation_confirmed) {
-    db.prepare('INSERT INTO flags (rule_id, record_type, batch_id_label, triggered_at_utc, status) VALUES (?, ?, ?, ?, ?)')
-      .run('VE-16', 'seal', batch.batch_id_label, new Date().toISOString(), 'OPEN');
+    await execute(
+      'INSERT INTO flags (rule_id, record_type, batch_id_label, triggered_at_utc, status) VALUES (?, ?, ?, ?, ?)',
+      ['VE-16', 'seal', batch.batch_id_label, new Date().toISOString(), 'OPEN']
+    );
   }
-  
-  db.prepare('UPDATE batches SET status=?, sample_retention_ref=?, updated_at_utc=? WHERE id=?').run('SAMPLE_SEALED', retention_ref, new Date().toISOString(), id);
-  res.json({ message: "Sample sealed" });
+
+  await execute(
+    'UPDATE batches SET status=?, sample_retention_ref=?, updated_at_utc=? WHERE id=?',
+    ['SAMPLE_SEALED', retention_ref, new Date().toISOString(), id]
+  );
+  res.json({ message: 'Sample sealed' });
 });
 
 // CoA Upload (Lab Tech only)
-router.post("/coa-upload", authenticate(["LAB_TECHNICIAN"]), (req: any, res: any) => {
+router.post('/coa-upload', authenticate(['LAB_TECHNICIAN']), async (req: any, res: any) => {
   const { plant_code, ctot_pct, cinorg_pct, mh_pct, submission_date } = req.body;
   const now = new Date().toISOString();
 
-  // Find all pending batches for this plant
-  const pendingBatches = db.prepare(`SELECT batch_id_label, status, sample_retention_ref FROM batches WHERE plant_code = ? AND status IN ('SAMPLE_SEALED', 'DISPATCHED')`).all(plant_code) as any[];
+  const pendingBatches = await query(
+    `SELECT batch_id_label, status, sample_retention_ref FROM batches WHERE plant_code = ? AND status IN ('SAMPLE_SEALED', 'DISPATCHED')`,
+    [plant_code]
+  );
 
   if (pendingBatches.length === 0) {
-    return res.status(400).json({ error: "No pending batches found for this plant." });
+    return res.status(400).json({ error: 'No pending batches found for this plant.' });
   }
 
-  // date lag VE-09
   const report_date = now;
   const subDate = new Date(submission_date);
   const repDate = new Date(report_date);
   const lagDays = Math.floor((repDate.getTime() - subDate.getTime()) / (1000 * 60 * 60 * 24));
-  
+
   const corg_pct = ctot_pct - cinorg_pct;
   const hcorg_ratio = (mh_pct / 1) / (corg_pct / 12);
 
   for (const batch of pendingBatches) {
-    const { batch_id_label, sample_retention_ref } = batch;
+    const { batch_id_label, sample_retention_ref } = batch as any;
 
     if (lagDays > 30) {
-      db.prepare('INSERT INTO flags (rule_id, record_type, batch_id_label, triggered_at_utc, status) VALUES (?, ?, ?, ?, ?)')
-        .run('VE-09', 'coa', batch_id_label, now, 'OPEN');
+      await execute(
+        'INSERT INTO flags (rule_id, record_type, batch_id_label, triggered_at_utc, status) VALUES (?, ?, ?, ?, ?)',
+        ['VE-09', 'coa', batch_id_label, now, 'OPEN']
+      );
     }
 
-    // H/Corg rules
     if (hcorg_ratio >= 0.70) {
-      db.prepare('INSERT INTO flags (rule_id, record_type, batch_id_label, triggered_at_utc, status) VALUES (?, ?, ?, ?, ?)')
-        .run('VE-06', 'coa', batch_id_label, now, 'OPEN');
-      // "BLOCK" action implies we stop processing this batch or return error. Let's flag but error out to block coa record for THIS batch.
-      continue; 
+      await execute(
+        'INSERT INTO flags (rule_id, record_type, batch_id_label, triggered_at_utc, status) VALUES (?, ?, ?, ?, ?)',
+        ['VE-06', 'coa', batch_id_label, now, 'OPEN']
+      );
+      continue;
     }
 
     if (hcorg_ratio < 0.15) {
-      db.prepare('INSERT INTO flags (rule_id, record_type, batch_id_label, triggered_at_utc, status) VALUES (?, ?, ?, ?, ?)')
-        .run('VE-07', 'coa', batch_id_label, now, 'OPEN');
+      await execute(
+        'INSERT INTO flags (rule_id, record_type, batch_id_label, triggered_at_utc, status) VALUES (?, ?, ?, ?, ?)',
+        ['VE-07', 'coa', batch_id_label, now, 'OPEN']
+      );
     }
 
-    // DR-19: Lab Result Regression (>2 sigma from trailing 3-batch avg)
-    const trailingCoA = db.prepare('SELECT hcorg_ratio FROM coa_records WHERE batch_id_label IN (SELECT batch_id_label FROM batches WHERE plant_code = ?) ORDER BY id DESC LIMIT 3').all(plant_code) as any[];
+    // DR-19: Lab Result Regression
+    const trailingCoA = await query(
+      'SELECT hcorg_ratio FROM coa_records WHERE batch_id_label IN (SELECT batch_id_label FROM batches WHERE plant_code = ?) ORDER BY id DESC LIMIT 3',
+      [plant_code]
+    );
     if (trailingCoA.length === 3) {
-      const avg = trailingCoA.reduce((acc, c) => acc + c.hcorg_ratio, 0) / 3;
-      const stdDev = Math.sqrt(trailingCoA.reduce((acc, c) => acc + Math.pow(c.hcorg_ratio - avg, 2), 0) / 3);
+      const avg = trailingCoA.reduce((acc: number, c: any) => acc + c.hcorg_ratio, 0) / 3;
+      const stdDev = Math.sqrt(trailingCoA.reduce((acc: number, c: any) => acc + Math.pow(c.hcorg_ratio - avg, 2), 0) / 3);
       if (Math.abs(hcorg_ratio - avg) > 2 * stdDev) {
-        db.prepare('INSERT INTO flags (rule_id, record_type, batch_id_label, triggered_at_utc, status) VALUES (?, ?, ?, ?, ?)')
-          .run('DR-19', 'coa', batch_id_label, now, 'OPEN');
+        await execute(
+          'INSERT INTO flags (rule_id, record_type, batch_id_label, triggered_at_utc, status) VALUES (?, ?, ?, ?, ?)',
+          ['DR-19', 'coa', batch_id_label, now, 'OPEN']
+        );
       }
     }
 
-    db.prepare(`INSERT INTO coa_records (batch_id_label, lab_user_id, ctot_pct, cinorg_pct, corg_pct, mh_pct, hcorg_ratio, report_date, submission_date, retained_sample_ref, date_lag_days, upload_timestamp_utc) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(batch_id_label, req.user.id, ctot_pct, cinorg_pct, corg_pct, mh_pct, hcorg_ratio, report_date, submission_date, sample_retention_ref || "MISSING", lagDays, now);
-    
+    await execute(
+      'INSERT INTO coa_records (batch_id_label, lab_user_id, ctot_pct, cinorg_pct, corg_pct, mh_pct, hcorg_ratio, report_date, submission_date, retained_sample_ref, date_lag_days, upload_timestamp_utc) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [batch_id_label, req.user.id, ctot_pct, cinorg_pct, corg_pct, mh_pct, hcorg_ratio, report_date, submission_date, sample_retention_ref || 'MISSING', lagDays, now]
+    );
+
     // Run Carbon Engine
-    runCarbonEngine(batch_id_label);
+    await runCarbonEngine(batch_id_label);
   }
-  
+
   res.json({ message: `CoA processed and Carbon Engine run for ${pendingBatches.length} batches.` });
 });
 
 // Dispatches (Operator)
-router.post("/dispatches", authenticate(["PLANT_OPERATOR"]), (req, res) => {
+router.post('/dispatches', authenticate(['PLANT_OPERATOR']), async (req: any, res: any) => {
   const { batch_id_label, buyer_name, buyer_district, declared_use, weight } = req.body;
-  const dispatch_weight_t = parseFloat(weight) || 0; // User inputted weight
+  const dispatch_weight_t = parseFloat(weight) || 0;
 
-  const batch = db.prepare('SELECT qbiochar_dry FROM batches WHERE batch_id_label = ?').get(batch_id_label) as any;
-  const existingDispatches = db.prepare('SELECT SUM(dispatch_weight_t) as t FROM dispatches WHERE batch_id_label = ?').get(batch_id_label) as any;
+  const batch = await queryOne('SELECT qbiochar_dry FROM batches WHERE batch_id_label = ?', [batch_id_label]);
+  const existingRows = await query<{ t: number | null }>('SELECT SUM(dispatch_weight_t) as t FROM dispatches WHERE batch_id_label = ?', [batch_id_label]);
+  const existingDispatches = existingRows[0];
   const total = (existingDispatches?.t || 0) + dispatch_weight_t;
 
   if (total > batch.qbiochar_dry) {
     return res.status(400).json({ error: `VE-11: Dispatch blocked: total dispatched ${total.toFixed(2)}t would exceed batch output ${batch.qbiochar_dry.toFixed(2)}t` });
   }
-  
+
   const now = new Date();
-  const evidenceDue = new Date(now.getTime() + 60*24*60*60*1000).toISOString();
+  const evidenceDue = new Date(now.getTime() + 60 * 24 * 60 * 60 * 1000).toISOString();
 
-  db.prepare(`INSERT INTO dispatches (batch_id_label, buyer_name, buyer_district, declared_use, dispatch_weight_t, price_per_tonne, dispatch_date_utc, evidence_due_date, evidence_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-    .run(batch_id_label, buyer_name, buyer_district || '', declared_use, dispatch_weight_t, 0, now.toISOString(), evidenceDue, 'PENDING');
+  await execute(
+    'INSERT INTO dispatches (batch_id_label, buyer_name, buyer_district, declared_use, dispatch_weight_t, price_per_tonne, dispatch_date_utc, evidence_due_date, evidence_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    [batch_id_label, buyer_name, buyer_district || '', declared_use, dispatch_weight_t, 0, now.toISOString(), evidenceDue, 'PENDING']
+  );
 
-  db.prepare('UPDATE batches SET status=?, updated_at_utc=? WHERE batch_id_label=?').run('DISPATCHED', now.toISOString(), batch_id_label);
-  res.json({ message: "Dispatch recorded" });
+  await execute(
+    'UPDATE batches SET status=?, updated_at_utc=? WHERE batch_id_label=?',
+    ['DISPATCHED', now.toISOString(), batch_id_label]
+  );
+  res.json({ message: 'Dispatch recorded' });
 });
 
-router.get("/farmers", authenticate(["FIELD_OFFICER", "PLANT_OPERATOR", "MANAGEMENT", "AUDITOR"]), (req, res) => {
-  const farmers = db.prepare('SELECT id, full_name, village, verification_status FROM farmers').all();
+router.get('/farmers', authenticate(['FIELD_OFFICER', 'PLANT_OPERATOR', 'MANAGEMENT', 'AUDITOR']), async (req: any, res: any) => {
+  const farmers = await query('SELECT id, full_name, village, verification_status FROM farmers');
   res.json(farmers);
 });
 
-router.get("/dispatches", authenticate(["FIELD_OFFICER", "PLANT_OPERATOR", "MANAGEMENT", "AUDITOR"]), (req, res) => {
-  const ds = db.prepare('SELECT id, batch_id_label, buyer_name, buyer_district, declared_use, dispatch_weight_t, price_per_tonne, dispatch_date_utc, evidence_due_date, evidence_status FROM dispatches ORDER BY dispatch_date_utc DESC').all();
+router.get('/dispatches', authenticate(['FIELD_OFFICER', 'PLANT_OPERATOR', 'MANAGEMENT', 'AUDITOR']), async (req: any, res: any) => {
+  const ds = await query('SELECT id, batch_id_label, buyer_name, buyer_district, declared_use, dispatch_weight_t, price_per_tonne, dispatch_date_utc, evidence_due_date, evidence_status FROM dispatches ORDER BY dispatch_date_utc DESC');
   res.json(ds);
 });
-router.post("/dispatches/:id/evidence", authenticate(["FIELD_OFFICER", "PLANT_OPERATOR"]), (req, res) => {
+
+router.post('/dispatches/:id/evidence', authenticate(['FIELD_OFFICER', 'PLANT_OPERATOR']), async (req: any, res: any) => {
   const { id } = req.params;
   const { photo_url } = req.body;
   const now = new Date().toISOString();
-  
-  db.prepare(`
-    UPDATE dispatches 
-    SET evidence_status = 'RECEIVED', evidence_url = ?, evidence_received_at = ?
-    WHERE id = ?
-  `).run(photo_url || 'simulated-photo-url.jpg', now, id);
-  
-  res.json({ success: true, message: "Evidence uploaded successfully" });
+
+  await execute(
+    `UPDATE dispatches SET evidence_status = 'RECEIVED', evidence_url = ?, evidence_received_at = ? WHERE id = ?`,
+    [photo_url || 'simulated-photo-url.jpg', now, id]
+  );
+
+  res.json({ success: true, message: 'Evidence uploaded successfully' });
 });
 
-router.get("/batches", authenticate(["PLANT_OPERATOR", "MANAGEMENT", "AUDITOR", "LAB_TECHNICIAN"]), (req, res) => {
-  const batches = db.prepare(`
-    SELECT b.*, c.corcs_net 
-    FROM batches b 
-    LEFT JOIN carbon_calculations c ON b.batch_id_label = c.batch_id_label 
+router.get('/batches', authenticate(['PLANT_OPERATOR', 'MANAGEMENT', 'AUDITOR', 'LAB_TECHNICIAN']), async (req: any, res: any) => {
+  const batches = await query(`
+    SELECT b.*, c.corcs_net
+    FROM batches b
+    LEFT JOIN carbon_calculations c ON b.batch_id_label = c.batch_id_label
     ORDER BY b.id DESC
-  `).all();
+  `);
   res.json(batches);
 });
 
-router.post("/flags/:id/resolve", authenticate(["MANAGEMENT", "AUDITOR"]), (req, res) => {
+router.post('/flags/:id/resolve', authenticate(['MANAGEMENT', 'AUDITOR']), async (req: any, res: any) => {
   const { status } = req.body || { status: 'RESOLVED' };
-  db.prepare("UPDATE flags SET status = ? WHERE id = ?").run(status, req.params.id);
+  await execute('UPDATE flags SET status = ? WHERE id = ?', [status, req.params.id]);
   res.json({ success: true });
 });
 
-router.post("/coa/:id/seal-check", authenticate(["MANAGEMENT", "AUDITOR"]), (req, res) => {
+router.post('/coa/:id/seal-check', authenticate(['MANAGEMENT', 'AUDITOR']), async (req: any, res: any) => {
   const { id } = req.params;
   const { broken_seal, notes } = req.body;
   if (broken_seal) {
-    const coa = db.prepare('SELECT batch_id_label FROM coa_records WHERE id = ?').get(id) as any;
+    const coa = await queryOne('SELECT batch_id_label FROM coa_records WHERE id = ?', [id]);
     if (coa) {
-      db.prepare('INSERT INTO flags (rule_id, record_type, record_id, batch_id_label, triggered_at_utc, status, resolution_notes) VALUES (?, ?, ?, ?, ?, ?, ?)')
-        .run('VE-17', 'coa', id, coa.batch_id_label, new Date().toISOString(), 'OPEN', notes || 'Broken seal reported by retrieval officer.');
+      await execute(
+        'INSERT INTO flags (rule_id, record_type, record_id, batch_id_label, triggered_at_utc, status, resolution_notes) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        ['VE-17', 'coa', id, coa.batch_id_label, new Date().toISOString(), 'OPEN', notes || 'Broken seal reported by retrieval officer.']
+      );
     }
   }
   res.json({ success: true });
 });
 
-router.get("/flags", authenticate(["MANAGEMENT", "AUDITOR", "PLANT_OPERATOR", "FIELD_OFFICER"]), (req, res) => {
-  let flags = db.prepare("SELECT * FROM flags WHERE status = 'OPEN' ORDER BY id DESC").all() as any[];
-  
-  // Filter relevant flags for non-MGMT roles if needed? 
-  // User said "other profile consoles can also check their relevant flags"
+router.get('/flags', authenticate(['MANAGEMENT', 'AUDITOR', 'PLANT_OPERATOR', 'FIELD_OFFICER']), async (req: any, res: any) => {
+  let flags = await query("SELECT * FROM flags WHERE status = 'OPEN' ORDER BY id DESC") as any[];
+
   if (req.user?.role === 'FIELD_OFFICER') {
-    flags = flags.filter(f => f.record_type === 'delivery' || f.rule_id.startsWith('VE-05') || f.rule_id.startsWith('VE-01'));
+    flags = flags.filter((f: any) => f.record_type === 'delivery' || f.rule_id.startsWith('VE-05') || f.rule_id.startsWith('VE-01'));
   } else if (req.user?.role === 'PLANT_OPERATOR') {
-    flags = flags.filter(f => f.record_type === 'batch' || f.record_type === 'seal');
+    flags = flags.filter((f: any) => f.record_type === 'batch' || f.record_type === 'seal');
   }
 
   res.json(flags);
 });
 
-router.get("/dashboard", authenticate(["MANAGEMENT"]), (req, res) => {
-  const corcsTotal = db.prepare("SELECT SUM(corcs_net) as t FROM carbon_calculations").get() as any;
-  const activeFlags = db.prepare("SELECT COUNT(*) as c FROM flags WHERE status = 'OPEN'").get() as any;
-  const flaggedBatches = db.prepare("SELECT * FROM flags WHERE status = 'OPEN' ORDER BY id DESC").all() as any[];
-  const expiringCerts = db.prepare("SELECT * FROM calibration_certs WHERE status = 'VALID' OR status = 'EXPIRING'").all();
-  const dispatches = db.prepare("SELECT SUM(dispatch_weight_t) as t FROM dispatches").get() as any;
-  const batches = db.prepare("SELECT b.*, c.corcs_net FROM batches b LEFT JOIN carbon_calculations c ON b.batch_id_label = c.batch_id_label ORDER BY id DESC").all() as any[];
+router.get('/dashboard', authenticate(['MANAGEMENT']), async (req: any, res: any) => {
+  const corcsRows = await query<{ t: number | null }>('SELECT SUM(corcs_net) as t FROM carbon_calculations');
+  const corcsTotal = corcsRows[0];
+  const activeFlagRows = await query<{ c: number }>("SELECT COUNT(*) as c FROM flags WHERE status = 'OPEN'");
+  const activeFlags = activeFlagRows[0];
+  const expiringCerts = await query("SELECT * FROM calibration_certs WHERE status = 'VALID' OR status = 'EXPIRING'");
+  const dispatchRows = await query<{ t: number | null }>('SELECT SUM(dispatch_weight_t) as t FROM dispatches');
+  const dispatches = dispatchRows[0];
+  const batches = await query(`
+    SELECT b.*, c.corcs_net FROM batches b
+    LEFT JOIN carbon_calculations c ON b.batch_id_label = c.batch_id_label
+    ORDER BY id DESC
+  `) as any[];
 
   // 1. Funnel
   const funnel = {
-    productionComplete: batches.filter(b => b.status === 'PRODUCTION_COMPLETE').length,
-    sampleSealed: batches.filter(b => b.status === 'SAMPLE_SEALED').length,
-    dispatched: batches.filter(b => b.status === 'DISPATCHED').length,
-    carbonCalculated: batches.filter(b => !!b.corcs_net).length,
-    auditReady: batches.filter(b => !!b.corcs_net && b.status === 'DISPATCHED').length,
+    productionComplete: batches.filter((b: any) => b.status === 'PRODUCTION_COMPLETE').length,
+    sampleSealed: batches.filter((b: any) => b.status === 'SAMPLE_SEALED').length,
+    dispatched: batches.filter((b: any) => b.status === 'DISPATCHED').length,
+    carbonCalculated: batches.filter((b: any) => !!b.corcs_net).length,
+    auditReady: batches.filter((b: any) => !!b.corcs_net && b.status === 'DISPATCHED').length,
   };
 
   // 2. Monthly Trend (last 7 months)
@@ -517,15 +585,13 @@ router.get("/dashboard", authenticate(["MANAGEMENT"]), (req, res) => {
   for (let i = 6; i >= 0; i--) {
     const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
     const monthLabel = d.toLocaleString('default', { month: 'short' });
-    const monthYear = d.toISOString().slice(0, 7); // YYYY-MM
-    
-    // Confirmed: has corcs_net and month matches created_at or updated_at
-    // For simplicity, let's look at batches created in that month
-    const monthBatches = batches.filter(b => b.created_at_utc.startsWith(monthYear));
-    const confirmed = monthBatches.reduce((acc, b) => acc + (b.corcs_net || 0), 0);
-    // Pending: if in relevant states but no corcs_net yet
-    const pending = monthBatches.filter(b => !b.corcs_net && ['PRODUCTION_COMPLETE', 'SAMPLE_SEALED', 'DISPATCHED'].includes(b.status))
-                   .reduce((acc, b) => acc + (b.qbiochar_dry ? b.qbiochar_dry * 0.4 : 0), 0); // Estimated 0.4 CORCs per tonne if pending
+    const monthYear = d.toISOString().slice(0, 7);
+
+    const monthBatches = batches.filter((b: any) => b.created_at_utc && b.created_at_utc.startsWith(monthYear));
+    const confirmed = monthBatches.reduce((acc: number, b: any) => acc + (b.corcs_net || 0), 0);
+    const pending = monthBatches
+      .filter((b: any) => !b.corcs_net && ['PRODUCTION_COMPLETE', 'SAMPLE_SEALED', 'DISPATCHED'].includes(b.status))
+      .reduce((acc: number, b: any) => acc + (b.qbiochar_dry ? b.qbiochar_dry * 0.4 : 0), 0);
 
     months.push({ name: monthLabel, confirmed, pending });
   }
@@ -536,34 +602,38 @@ router.get("/dashboard", authenticate(["MANAGEMENT"]), (req, res) => {
     const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
     const periodName = d.toLocaleString('default', { month: 'long', year: 'numeric' });
     const monthYear = d.toISOString().slice(0, 7);
-    const pBatches = batches.filter(b => b.created_at_utc.startsWith(monthYear));
-    
+    const pBatches = batches.filter((b: any) => b.created_at_utc && b.created_at_utc.startsWith(monthYear));
+
     if (pBatches.length > 0) {
-      const coaCount = db.prepare(`SELECT COUNT(*) as c FROM coa_records WHERE batch_id_label IN (SELECT batch_id_label FROM batches WHERE created_at_utc LIKE '${monthYear}%')`).get() as any;
+      const coaRows = await query<{ c: number }>(
+        `SELECT COUNT(*) as c FROM coa_records WHERE batch_id_label IN (SELECT batch_id_label FROM batches WHERE created_at_utc LIKE ?)`,
+        [`${monthYear}%`]
+      );
+      const coaCount = coaRows[0];
       const status = coaCount.c >= pBatches.length ? 'COMPLETE' : 'PENDING';
       const daysOpen = status === 'COMPLETE' ? 0 : Math.floor((now.getTime() - d.getTime()) / (1000 * 60 * 60 * 24));
       labPeriods.push({ name: periodName, batchCount: pBatches.length, daysOpen, status });
     }
   }
 
-  // 4. Detailed Flags
-  // VE-12 check: Evidence missing > 60 days post-dispatch
+  // 4. VE-12: Evidence missing > 60 days post-dispatch
   const sixtyDaysAgo = new Date(Date.now() - 60 * 24 * 60 * 60 * 1000).toISOString();
-  const overdueDispatches = db.prepare("SELECT * FROM dispatches WHERE evidence_status = 'PENDING' AND dispatch_date_utc < ?").all(sixtyDaysAgo) as any[];
+  const overdueDispatches = await query("SELECT * FROM dispatches WHERE evidence_status = 'PENDING' AND dispatch_date_utc < ?", [sixtyDaysAgo]) as any[];
   for (const d of overdueDispatches) {
-    const exists = db.prepare("SELECT id FROM flags WHERE rule_id = 'VE-12' AND record_id = ?").get(d.id);
+    const exists = await queryOne("SELECT id FROM flags WHERE rule_id = 'VE-12' AND record_id = ?", [d.id]);
     if (!exists) {
-      db.prepare("INSERT INTO flags (rule_id, record_type, record_id, batch_id_label, triggered_at_utc, status) VALUES (?, ?, ?, ?, ?, ?)")
-        .run('VE-12', 'dispatch', d.id, d.batch_id_label, new Date().toISOString(), 'OPEN');
+      await execute(
+        'INSERT INTO flags (rule_id, record_type, record_id, batch_id_label, triggered_at_utc, status) VALUES (?, ?, ?, ?, ?, ?)',
+        ['VE-12', 'dispatch', d.id, d.batch_id_label, new Date().toISOString(), 'OPEN']
+      );
     }
   }
 
-  // Refresh flagged batches after potential VE-12 markers
-  const currentFlagged = db.prepare("SELECT * FROM flags WHERE status = 'OPEN' ORDER BY id DESC").all() as any[];
+  const currentFlagged = await query("SELECT * FROM flags WHERE status = 'OPEN' ORDER BY id DESC") as any[];
 
-  const flags = currentFlagged.map(f => {
+  const flags = currentFlagged.map((f: any) => {
     let desc = 'Integrity violation flagged by engine.';
-    switch(f.rule_id) {
+    switch (f.rule_id) {
       case 'VE-01': desc = 'Duplicate Vehicle Window: Same vehicle detected within 4 hours.'; break;
       case 'VE-02': desc = 'Yield Ratio Anomaly: Output outside 25-40% range.'; break;
       case 'VE-03': desc = 'Missing PLC Logs: Null telemetry stream during production.'; break;
@@ -585,17 +655,14 @@ router.get("/dashboard", authenticate(["MANAGEMENT"]), (req, res) => {
       case 'VE-16': desc = 'Attestation Missing: Label visibility not confirmed.'; break;
       case 'VE-17': desc = 'Broken Seal: Reporting by Compliance Officer.'; break;
     }
-    return {
-      ...f,
-      blocksDispatch: f.rule_id.startsWith('VE-'),
-      description: desc
-    };
+    return { ...f, blocksDispatch: f.rule_id.startsWith('VE-'), description: desc };
   });
 
   // 5. Revenue
   const confirmedRev = (corcsTotal?.t || 0) * 120;
-  const pipelineRev = batches.filter(b => !b.corcs_net && b.qbiochar_dry > 0)
-                             .reduce((acc, b) => acc + (b.qbiochar_dry * 0.4 * 110), 0); // $110 for pipeline est
+  const pipelineRev = batches
+    .filter((b: any) => !b.corcs_net && b.qbiochar_dry > 0)
+    .reduce((acc: number, b: any) => acc + (b.qbiochar_dry * 0.4 * 110), 0);
 
   res.json({
     corcsTotal: corcsTotal?.t || 0,
@@ -607,8 +674,9 @@ router.get("/dashboard", authenticate(["MANAGEMENT"]), (req, res) => {
     labPeriods,
     flags,
     batches: batches || [],
-    expiringCerts: expiringCerts || []
+    expiringCerts: expiringCerts || [],
   });
 });
 
+export { initDb, seedDb };
 export default router;
