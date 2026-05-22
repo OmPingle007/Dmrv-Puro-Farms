@@ -11,18 +11,27 @@ const app = express();
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
-let dbInitialized = false;
+let dbInitPromise: Promise<void> | null = null;
 app.use("/api", async (req, res, next) => {
-  if (!dbInitialized) {
-    try {
-      await initDb();
-      await seedDb();
-      dbInitialized = true;
-    } catch (e) {
-      console.error("DB Init Error:", e);
-    }
+  if (!dbInitPromise) {
+    dbInitPromise = (async () => {
+      try {
+        await initDb();
+        await seedDb();
+      } catch (e) {
+        console.error("DB Init Error:", e);
+        // Clear promise so we can retry on next request
+        dbInitPromise = null;
+        throw e;
+      }
+    })();
   }
-  next();
+  try {
+    await dbInitPromise;
+    next();
+  } catch (e) {
+    res.status(500).json({ error: "DB Init failed. Check Vercel Env Vars for TURSO_DATABASE_URL and TURSO_AUTH_TOKEN." });
+  }
 }, apiRouter);
 
 // Export app for Vercel

@@ -86,12 +86,17 @@ router.post("/batches/:id/ncr", authenticate(["AUDITOR"]), async (req, res) => {
 
 router.post("/auth/login", async (req, res) => {
   const { email, password } = req.body;
-  const user = await db.prepare('SELECT * FROM users WHERE email = ?').get(email) as any;
-  if (!user || !bcrypt.compareSync(password, user.password_hash)) {
-    return res.status(401).json({ error: "Invalid credentials" });
+  try {
+    const user = await db.prepare('SELECT * FROM users WHERE email = ?').get(email) as any;
+    if (!user || !bcrypt.compareSync(password, user.password_hash)) {
+      return res.status(401).json({ error: "Invalid credentials" });
+    }
+    const token = jwt.sign({ id: user.id, email: user.email, role: user.role }, JWT_SECRET, { expiresIn: '24h' });
+    res.json({ token, role: user.role, email: user.email });
+  } catch (error: any) {
+    console.error("Login DB Error:", error);
+    res.status(500).json({ error: "Database error during login. Make sure Turso credentials are set in Vercel. Details: " + String(error.message) });
   }
-  const token = jwt.sign({ id: user.id, email: user.email, role: user.role }, JWT_SECRET, { expiresIn: '24h' });
-  res.json({ token, role: user.role, email: user.email });
 });
 
 // Add these imports at the top
