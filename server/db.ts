@@ -2,7 +2,7 @@ import { createClient } from '@libsql/client';
 import bcrypt from 'bcryptjs';
 
 const client = createClient({
-  url: process.env.TURSO_DATABASE_URL || 'file:purofarms.db',
+  url: process.env.TURSO_DATABASE_URL || (process.env.VERCEL ? 'file:/tmp/purofarms.db' : 'file:purofarms.db'),
   authToken: process.env.TURSO_AUTH_TOKEN,
 });
 
