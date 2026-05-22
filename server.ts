@@ -1,16 +1,16 @@
 import express from "express";
 import { createServer as createViteServer } from "vite";
 import path from "path";
-import { fileURLToPath } from "url";
-import { dirname } from "path";
-import apiRouter from "./server/api.ts";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
+import apiRouter from "./server/api.js";
+import { initDb, seedDb } from "./server/db.js";
 
 async function startServer() {
   const app = express();
   const PORT = 3000;
+
+  // Initialize Data
+  await initDb();
+  await seedDb();
 
   // Middleware
   app.use(express.json({ limit: '50mb' }));

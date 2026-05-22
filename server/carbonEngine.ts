@@ -9,13 +9,13 @@ const SOIL_TEMP: Record<string, number> = {
   'Wardha': 26.5
 };
 
-export function runCarbonEngine(batchIdLabel: string) {
+export async function runCarbonEngine(batchIdLabel: string) {
   // get batch
-  const batch = db.prepare('SELECT * FROM batches WHERE batch_id_label = ?').get(batchIdLabel) as any;
+  const batch = await db.prepare('SELECT * FROM batches WHERE batch_id_label = ?').get(batchIdLabel) as any;
   if (!batch) throw new Error("Batch not found");
 
   // get coa
-  const coa = db.prepare('SELECT * FROM coa_records WHERE batch_id_label = ? ORDER BY id DESC LIMIT 1').get(batchIdLabel) as any;
+  const coa = await db.prepare('SELECT * FROM coa_records WHERE batch_id_label = ? ORDER BY id DESC LIMIT 1').get(batchIdLabel) as any;
   if (!coa) throw new Error("CoA not found");
 
   // 1. Qbiochar
@@ -30,22 +30,22 @@ export function runCarbonEngine(batchIdLabel: string) {
 
   // 4. GATE
   if (hcorg >= 0.70) {
-    db.prepare('UPDATE batches SET status = ? WHERE batch_id_label = ?').run('CORC_INELIGIBLE', batchIdLabel);
+    await db.prepare('UPDATE batches SET status = ? WHERE batch_id_label = ?').run('CORC_INELIGIBLE', batchIdLabel);
     
     // Log Flag VE-06
-    db.prepare('INSERT INTO flags (rule_id, record_type, record_id, batch_id_label, triggered_at_utc, status) VALUES (?, ?, ?, ?, ?, ?)')
-      .run('VE-06', 'batch', batch.id, batchIdLabel, new Date().toISOString(), 'OPEN');
+    await db.prepare('INSERT INTO flags (rule_id, record_type, record_id, batch_id_label, triggered_at_utc, status) VALUES (?, ?, ?, ?, ?, ?)')
+            .run('VE-06', 'batch', batch.id, batchIdLabel, new Date().toISOString(), 'OPEN');
       
     // Write incomplete calculation
-    db.prepare(`INSERT OR REPLACE INTO carbon_calculations (batch_id_label, qbiochar, corg_pct, hcorg, calculated_at_utc, calculated_by_system) 
+    await db.prepare(`INSERT OR REPLACE INTO carbon_calculations (batch_id_label, qbiochar, corg_pct, hcorg, calculated_at_utc, calculated_by_system) 
                 VALUES (?, ?, ?, ?, ?, ?)`)
-      .run(batchIdLabel, qbiochar, corg, hcorg, new Date().toISOString(), 1);
+            .run(batchIdLabel, qbiochar, corg, hcorg, new Date().toISOString(), 1);
     return false;
   }
   
   if (hcorg < 0.15) {
-     db.prepare('INSERT INTO flags (rule_id, record_type, record_id, batch_id_label, triggered_at_utc, status) VALUES (?, ?, ?, ?, ?, ?)')
-      .run('VE-07', 'batch', batch.id, batchIdLabel, new Date().toISOString(), 'OPEN');
+     await db.prepare('INSERT INTO flags (rule_id, record_type, record_id, batch_id_label, triggered_at_utc, status) VALUES (?, ?, ?, ?, ?, ?)')
+            .run('VE-07', 'batch', batch.id, batchIdLabel, new Date().toISOString(), 'OPEN');
   }
 
   // 5. Ts (simplified, mock district lookup based on some logic, or use Amaravati default)
@@ -86,13 +86,13 @@ export function runCarbonEngine(batchIdLabel: string) {
   let transportDieselFeedstock = 0;
   if (feedstockLotIds && feedstockLotIds.length > 0) {
     const placeholders = feedstockLotIds.map(() => '?').join(',');
-    const deliveries = db.prepare(`SELECT gps_lat, gps_lng FROM deliveries WHERE id IN (${placeholders})`).all(...feedstockLotIds) as any[];
+    const deliveries = await db.prepare(`SELECT gps_lat, gps_lng FROM deliveries WHERE id IN (${placeholders})`).all(...feedstockLotIds) as any[];
     // Rough estimate: Assume avg distance 20km, fuel efficiency 5km/L => 4L per delivery
     transportDieselFeedstock = deliveries.length * 4;
   }
 
   // Fetch dispatches for this batch to estimate outbound transport fuel
-  const dispatches = db.prepare(`SELECT dispatch_weight_t FROM dispatches WHERE batch_id_label = ?`).all(batchIdLabel) as any[];
+  const dispatches = await db.prepare(`SELECT dispatch_weight_t FROM dispatches WHERE batch_id_label = ?`).all(batchIdLabel) as any[];
   // Rough estimate: Assume avg distance 50km, fuel efficiency 4km/L for larger trucks => 12.5L per dispatch
   let transportDieselBiochar = dispatches.length * 12.5;
 
@@ -109,13 +109,13 @@ export function runCarbonEngine(batchIdLabel: string) {
   // 14. U
   const uncertainty = 8.5;
 
-  db.prepare(`INSERT OR REPLACE INTO carbon_calculations 
+  await db.prepare(`INSERT OR REPLACE INTO carbon_calculations 
     (batch_id_label, qbiochar, corg_pct, hcorg, pf, cstored, closs, cbaseline, ebiomass, eproduction, eleakage, corcs_net, uncertainty_pct, calculated_at_utc, calculated_by_system)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-    .run(batchIdLabel, qbiochar, corg, hcorg, pf_percent, cstored, clossActual, cbaseline, ebiomass, eproduction, eleakage, corcs, uncertainty, new Date().toISOString(), 1);
+        .run(batchIdLabel, qbiochar, corg, hcorg, pf_percent, cstored, clossActual, cbaseline, ebiomass, eproduction, eleakage, corcs, uncertainty, new Date().toISOString(), 1);
 
   // update batch status
-  db.prepare('UPDATE batches SET status = ? WHERE batch_id_label = ?').run('CARBON_CALCULATED', batchIdLabel);
+  await db.prepare('UPDATE batches SET status = ? WHERE batch_id_label = ?').run('CARBON_CALCULATED', batchIdLabel);
   
   return true;
 }

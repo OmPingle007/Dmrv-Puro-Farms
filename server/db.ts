@@ -1,13 +1,62 @@
-import Database from 'better-sqlite3';
+import { createClient } from '@libsql/client';
 import bcrypt from 'bcryptjs';
 
-const db = new Database('purofarms.db', { verbose: console.log });
+const client = createClient({
+  url: process.env.TURSO_DATABASE_URL || 'file:purofarms.db',
+  authToken: process.env.TURSO_AUTH_TOKEN,
+});
 
-// Enable Foreign Keys
-db.pragma('foreign_keys = ON');
+class Statement {
+  sql: string;
+  constructor(sql: string) {
+    this.sql = sql;
+  }
+  async run(...args: any[]) {
+    try {
+      const res = await client.execute({ sql: this.sql, args });
+      return { lastInsertRowid: Number(res.lastInsertRowid || 0), changes: res.rowsAffected };
+    } catch (e) {
+      console.error('SQL RUN ERROR:', e, this.sql);
+      throw e;
+    }
+  }
+  async get(...args: any[]) {
+    try {
+      const res = await client.execute({ sql: this.sql, args });
+      return res.rows[0];
+    } catch (e) {
+      console.error('SQL GET ERROR:', e, this.sql);
+      throw e;
+    }
+  }
+  async all(...args: any[]) {
+    try {
+      const res = await client.execute({ sql: this.sql, args });
+      return res.rows;
+    } catch (e) {
+      console.error('SQL ALL ERROR:', e, this.sql);
+      throw e;
+    }
+  }
+}
 
-export function initDb() {
+const db = {
+  prepare: (sql: string) => new Statement(sql),
+  transaction: (fn: Function) => async (...args: any[]) => {
+    // Basic shim for simple transactions; does not handle true nested libsql transactions here for brevity
+    return await fn(...args);
+  },
+  pragma: async (sql: string) => {
+    try {
+      await client.execute('PRAGMA ' + sql);
+    } catch(e) {}
+  }
+};
+
+export async function initDb() {
   console.log("Initializing database schema...");
+  // Enable Foreign Keys
+  await db.pragma('foreign_keys = ON');
 
   const tables = [
     `CREATE TABLE IF NOT EXISTS users (
@@ -38,6 +87,8 @@ export function initDb() {
       verification_status TEXT,
       registered_at_utc TEXT,
       flagged_for_call_verification BOOLEAN,
+      land_document_url TEXT,
+      noc_document_url TEXT,
       FOREIGN KEY (fpo_id) REFERENCES fpos(id)
     )`,
     `CREATE TABLE IF NOT EXISTS calibration_certs (
@@ -191,33 +242,19 @@ export function initDb() {
   ];
 
   for (const tableQuery of tables) {
-    db.prepare(tableQuery).run();
+    await db.prepare(tableQuery).run();
   }
-
-  try {
-    db.prepare("ALTER TABLE batches ADD COLUMN sample_retention_ref TEXT").run();
-  } catch (e: any) {
-    // Ignore error if column already exists
-  }
-
-  try {
-    db.prepare("ALTER TABLE farmers ADD COLUMN land_document_url TEXT").run();
-  } catch (e: any) {}
-
-  try {
-    db.prepare("ALTER TABLE farmers ADD COLUMN noc_document_url TEXT").run();
-  } catch (e: any) {}
 }
 
-export function seedDb() {
-  const userCount = db.prepare('SELECT COUNT(*) as count FROM users').get() as { count: number };
-  if (userCount.count > 0) {
+export async function seedDb() {
+  const userCount = await db.prepare('SELECT COUNT(*) as count FROM users').get() as { count: number };
+  if (userCount && userCount.count > 0) {
     console.log("DB already seeded.");
     return;
   }
 
   console.log("Seeding dummy data into database...");
-  const t = db.transaction(() => {
+  const t = db.transaction(async () => {
     // 1. Users
     const roles = ['FIELD_OFFICER', 'PLANT_OPERATOR', 'LAB_TECHNICIAN', 'AUDITOR', 'MANAGEMENT'];
     const usersData = roles.map(role => {
@@ -237,65 +274,65 @@ export function seedDb() {
     });
 
     const insertUser = db.prepare(`INSERT INTO users (email, password_hash, role, created_at) VALUES (?, ?, ?, ?)`);
-    for (const u of usersData) insertUser.run(u.email, u.password_hash, u.role, u.created_at);
+    for (const u of usersData) await insertUser.run(u.email, u.password_hash, u.role, u.created_at);
 
     // 2. FPOs
     const insertFPO = db.prepare('INSERT INTO fpos (name, district, supply_agreement_url, exclusivity_confirmed, season) VALUES (?, ?, ?, ?, ?)');
-    insertFPO.run('Vidarbha FPO 1', 'Amaravati', 'url', 1, 'FY26');
-    insertFPO.run('Vidarbha FPO 2', 'Akola', 'url', 1, 'FY26');
-    insertFPO.run('Vidarbha FPO 3', 'Nagpur', 'url', 1, 'FY26');
+    await insertFPO.run('Vidarbha FPO 1', 'Amaravati', 'url', 1, 'FY26');
+    await insertFPO.run('Vidarbha FPO 2', 'Akola', 'url', 1, 'FY26');
+    await insertFPO.run('Vidarbha FPO 3', 'Nagpur', 'url', 1, 'FY26');
 
     // 3. Farmers (8 total)
     const insertFarmer = db.prepare('INSERT INTO farmers (full_name, village, fpo_id, aadhaar_hash, pm_kisan_id, gps_lat, gps_lng, registration_photo_url, verification_status, registered_at_utc, flagged_for_call_verification) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
-    insertFarmer.run('Rahul Patil', 'Shirpur', 1, 'hash1', 'PK1', 20.93, 77.75, 'url', 'VERIFIED', new Date().toISOString(), 0);
-    insertFarmer.run('Anil Deshmukh', 'Shirpur', 1, 'hash2', 'PK2', 20.93, 77.75, 'url', 'VERIFIED', new Date().toISOString(), 0);
-    insertFarmer.run('Sanjay Kale', 'Karanja', 2, 'hash3', 'PK3', 20.48, 77.48, 'url', 'PENDING', new Date().toISOString(), 1);
-    insertFarmer.run('Vikasrao', 'Karanja', 2, 'hash4', 'PK4', 20.48, 77.48, 'url', 'VERIFIED', new Date().toISOString(), 0);
-    insertFarmer.run('Ganesh Shinde', 'Saoner', 3, 'hash5', 'PK5', 21.38, 78.98, 'url', 'VERIFIED', new Date().toISOString(), 0);
-    insertFarmer.run('Ramesh Kumar', 'Saoner', 3, 'hash6', 'PK6', 21.38, 78.98, 'url', 'VERIFIED', new Date().toISOString(), 0);
-    insertFarmer.run('Pramod Jadhav', 'Shirpur', 1, 'hash7', 'PK7', 20.93, 77.75, 'url', 'PENDING', new Date().toISOString(), 0);
-    insertFarmer.run('Kiran Pawar', 'Karanja', 2, 'hash8', 'PK8', 20.48, 77.48, 'url', 'VERIFIED', new Date().toISOString(), 0);
+    await insertFarmer.run('Rahul Patil', 'Shirpur', 1, 'hash1', 'PK1', 20.93, 77.75, 'url', 'VERIFIED', new Date().toISOString(), 0);
+    await insertFarmer.run('Anil Deshmukh', 'Shirpur', 1, 'hash2', 'PK2', 20.93, 77.75, 'url', 'VERIFIED', new Date().toISOString(), 0);
+    await insertFarmer.run('Sanjay Kale', 'Karanja', 2, 'hash3', 'PK3', 20.48, 77.48, 'url', 'PENDING', new Date().toISOString(), 1);
+    await insertFarmer.run('Vikasrao', 'Karanja', 2, 'hash4', 'PK4', 20.48, 77.48, 'url', 'VERIFIED', new Date().toISOString(), 0);
+    await insertFarmer.run('Ganesh Shinde', 'Saoner', 3, 'hash5', 'PK5', 21.38, 78.98, 'url', 'VERIFIED', new Date().toISOString(), 0);
+    await insertFarmer.run('Ramesh Kumar', 'Saoner', 3, 'hash6', 'PK6', 21.38, 78.98, 'url', 'VERIFIED', new Date().toISOString(), 0);
+    await insertFarmer.run('Pramod Jadhav', 'Shirpur', 1, 'hash7', 'PK7', 20.93, 77.75, 'url', 'PENDING', new Date().toISOString(), 0);
+    await insertFarmer.run('Kiran Pawar', 'Karanja', 2, 'hash8', 'PK8', 20.48, 77.48, 'url', 'VERIFIED', new Date().toISOString(), 0);
 
     // 5. Batches & PLC Logs
     const insertBatch = db.prepare(`INSERT INTO batches (batch_id_label, plant_code, feedstock_lot_ids, status, qbiochar_dry, record_hash, previous_batch_hash, created_at_utc) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
-    insertBatch.run('IND-VID-FY26-001', 'IND-VID', '[1,2]', 'DISPATCHED', 12.5, 'hashXYZ1', null, new Date().toISOString());
-    insertBatch.run('IND-VID-FY26-002', 'IND-VID', '[3,4]', 'PRODUCTION_COMPLETE', 15.0, 'hashXYZ2', 'hashXYZ1', new Date().toISOString());
-    insertBatch.run('IND-VID-FY26-003', 'IND-VID', '[5]', 'SAMPLE_SEALED', 11.2, 'hashXYZ3', 'hashXYZ2', new Date().toISOString());
-    insertBatch.run('IND-VID-FY26-004', 'IND-VID', '[6]', 'CARBON_CALCULATED', 14.1, 'hashXYZ4', 'hashXYZ3', new Date().toISOString());
-    insertBatch.run('IND-VID-FY26-005', 'IND-VID', '[7]', 'OPEN', null, 'hashXYZ5', 'hashXYZ4', new Date().toISOString());
-    insertBatch.run('IND-VID-FY26-006', 'IND-VID', '[8]', 'AUDIT_READY', 13.8, 'hashXYZ6', 'hashXYZ5', new Date().toISOString());
+    await insertBatch.run('IND-VID-FY26-001', 'IND-VID', '[1,2]', 'DISPATCHED', 12.5, 'hashXYZ1', null, new Date().toISOString());
+    await insertBatch.run('IND-VID-FY26-002', 'IND-VID', '[3,4]', 'PRODUCTION_COMPLETE', 15.0, 'hashXYZ2', 'hashXYZ1', new Date().toISOString());
+    await insertBatch.run('IND-VID-FY26-003', 'IND-VID', '[5]', 'SAMPLE_SEALED', 11.2, 'hashXYZ3', 'hashXYZ2', new Date().toISOString());
+    await insertBatch.run('IND-VID-FY26-004', 'IND-VID', '[6]', 'CARBON_CALCULATED', 14.1, 'hashXYZ4', 'hashXYZ3', new Date().toISOString());
+    await insertBatch.run('IND-VID-FY26-005', 'IND-VID', '[7]', 'OPEN', null, 'hashXYZ5', 'hashXYZ4', new Date().toISOString());
+    await insertBatch.run('IND-VID-FY26-006', 'IND-VID', '[8]', 'AUDIT_READY', 13.8, 'hashXYZ6', 'hashXYZ5', new Date().toISOString());
 
     const insertPlc = db.prepare(`INSERT INTO plc_logs (batch_id_label, sensor_id, timestamp_utc, temperature_c, residence_time_min, quality_flag) VALUES (?, ?, ?, ?, ?, ?)`);
-    ['IND-VID-FY26-001', 'IND-VID-FY26-002', 'IND-VID-FY26-003', 'IND-VID-FY26-004', 'IND-VID-FY26-005', 'IND-VID-FY26-006'].forEach(b => {
-      insertPlc.run(b, 'TS-01', new Date().toISOString(), 500, 30, 'OK');
-    });
+    for (const b of ['IND-VID-FY26-001', 'IND-VID-FY26-002', 'IND-VID-FY26-003', 'IND-VID-FY26-004', 'IND-VID-FY26-005', 'IND-VID-FY26-006']) {
+      await insertPlc.run(b, 'TS-01', new Date().toISOString(), 500, 30, 'OK');
+    }
 
     const insertCoa = db.prepare(`INSERT INTO coa_records (batch_id_label, lab_user_id, ctot_pct, cinorg_pct, corg_pct, mh_pct, hcorg_ratio, report_date, submission_date, retained_sample_ref, date_lag_days, upload_timestamp_utc) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
-    insertCoa.run('IND-VID-FY26-001', 3, 75.0, 0.5, 74.5, 1.5, 0.24, new Date().toISOString(), new Date().toISOString(), 'REF-1', 5, new Date().toISOString());
-    insertCoa.run('IND-VID-FY26-004', 3, 72.0, 0.4, 71.6, 1.8, 0.30, new Date().toISOString(), new Date().toISOString(), 'REF-2', 4, new Date().toISOString());
+    await insertCoa.run('IND-VID-FY26-001', 3, 75.0, 0.5, 74.5, 1.5, 0.24, new Date().toISOString(), new Date().toISOString(), 'REF-1', 5, new Date().toISOString());
+    await insertCoa.run('IND-VID-FY26-004', 3, 72.0, 0.4, 71.6, 1.8, 0.30, new Date().toISOString(), new Date().toISOString(), 'REF-2', 4, new Date().toISOString());
 
     const insertCarbon = db.prepare(`INSERT INTO carbon_calculations (batch_id_label, qbiochar, corg_pct, hcorg, corcs_net, calculated_at_utc, calculated_by_system) VALUES (?, ?, ?, ?, ?, ?, ?)`);
-    insertCarbon.run('IND-VID-FY26-001', 12.5, 74.5, 0.24, 25.4, new Date().toISOString(), 1);
-    insertCarbon.run('IND-VID-FY26-004', 14.1, 71.6, 0.30, 27.2, new Date().toISOString(), 1);
+    await insertCarbon.run('IND-VID-FY26-001', 12.5, 74.5, 0.24, 25.4, new Date().toISOString(), 1);
+    await insertCarbon.run('IND-VID-FY26-004', 14.1, 71.6, 0.30, 27.2, new Date().toISOString(), 1);
     
     // Simulate one CORC_INELIGIBLE
-    insertBatch.run('IND-VID-FY26-007', 'IND-VID', '[9]', 'CORC_INELIGIBLE', 10.0, 'hashXYZ7', 'hashXYZ6', new Date().toISOString());
-    insertPlc.run('IND-VID-FY26-007', 'TS-01', new Date().toISOString(), 450, 30, 'OK');
-    insertCoa.run('IND-VID-FY26-007', 3, 60.0, 0.5, 59.5, 3.8, 0.76, new Date().toISOString(), new Date().toISOString(), 'REF-3', 2, new Date().toISOString());
+    await insertBatch.run('IND-VID-FY26-007', 'IND-VID', '[9]', 'CORC_INELIGIBLE', 10.0, 'hashXYZ7', 'hashXYZ6', new Date().toISOString());
+    await insertPlc.run('IND-VID-FY26-007', 'TS-01', new Date().toISOString(), 450, 30, 'OK');
+    await insertCoa.run('IND-VID-FY26-007', 3, 60.0, 0.5, 59.5, 3.8, 0.76, new Date().toISOString(), new Date().toISOString(), 'REF-3', 2, new Date().toISOString());
     
     // Some active flags
     const insertFlag = db.prepare(`INSERT INTO flags (rule_id, record_type, batch_id_label, triggered_at_utc, status) VALUES (?, ?, ?, ?, ?)`);
-    insertFlag.run('VE-02', 'batch', 'IND-VID-FY26-002', new Date().toISOString(), 'OPEN'); // yield ratio
-    insertFlag.run('VE-05', 'delivery', null, new Date().toISOString(), 'OPEN'); // GPS spoof
+    await insertFlag.run('VE-02', 'batch', 'IND-VID-FY26-002', new Date().toISOString(), 'OPEN'); // yield ratio
+    await insertFlag.run('VE-05', 'delivery', null, new Date().toISOString(), 'OPEN'); // GPS spoof
     const insertCert = db.prepare('INSERT INTO calibration_certs (instrument_name, instrument_id, cert_number, issue_date, expiry_date, nabl_accreditation_number, cert_url, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
-    insertCert.run('Weighbridge', 'WB-01', 'CERT-123', '2025-01-01', '2026-12-31', 'NABL-1', 'url', 'VALID');
-    insertCert.run('Bagging Scale', 'BS-01', 'CERT-124', '2025-01-01', '2026-05-17', 'NABL-1', 'url', 'VALID'); // Expiring soon
-    insertCert.run('PLC Temp Sensor', 'TS-01', 'CERT-125', '2025-01-01', '2026-12-31', 'NABL-1', 'url', 'VALID');
-    insertCert.run('Moisture Meter', 'MM-01', 'CERT-126', '2025-01-01', '2026-12-31', 'NABL-1', 'url', 'VALID');
+    await insertCert.run('Weighbridge', 'WB-01', 'CERT-123', '2025-01-01', '2026-12-31', 'NABL-1', 'url', 'VALID');
+    await insertCert.run('Bagging Scale', 'BS-01', 'CERT-124', '2025-01-01', '2026-05-17', 'NABL-1', 'url', 'VALID'); // Expiring soon
+    await insertCert.run('PLC Temp Sensor', 'TS-01', 'CERT-125', '2025-01-01', '2026-12-31', 'NABL-1', 'url', 'VALID');
+    await insertCert.run('Moisture Meter', 'MM-01', 'CERT-126', '2025-01-01', '2026-12-31', 'NABL-1', 'url', 'VALID');
 
   });
 
-  t();
+  await t();
   console.log("Database seed complete.");
 }
 
