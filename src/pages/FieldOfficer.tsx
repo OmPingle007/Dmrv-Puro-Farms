@@ -16,6 +16,8 @@ export default function FieldOfficer() {
   const [farmerLocation, setFarmerLocation] = useState<{ lat: number, lng: number } | null>(null);
   const [activeCameraAction, setActiveCameraAction] = useState<"delivery" | "moisture" | "evidence" | null>(null);
   const [evidenceDispatchId, setEvidenceDispatchId] = useState<number | null>(null);
+  const [landDoc, setLandDoc] = useState<string | null>(null);
+  const [nocDoc, setNocDoc] = useState<string | null>(null);
   const token = localStorage.getItem("token");
   
   const [searchParams] = useSearchParams();
@@ -99,13 +101,19 @@ export default function FieldOfficer() {
       setMsg("Error: Please capture GPS location first.");
       return;
     }
+    if (!landDoc || !nocDoc) {
+      setMsg("Error: Please upload both Land Document (7/12) and NOC.");
+      return;
+    }
     const data = {
       full_name: e.target.name.value,
       village: e.target.village.value,
       fpo_id: 1, // Defaulting per original
       aadhaar: e.target.aadhaar.value,
       gps_lat: farmerLocation.lat,
-      gps_lng: farmerLocation.lng
+      gps_lng: farmerLocation.lng,
+      land_document_url: landDoc,
+      noc_document_url: nocDoc
     };
     const res = await fetch("/api/farmers", {
       method: "POST",
@@ -118,10 +126,22 @@ export default function FieldOfficer() {
       fetchFarmers();
       setShowFarmerModal(false);
       setFarmerLocation(null);
+      setLandDoc(null);
+      setNocDoc(null);
       e.target.reset();
     } else {
       setMsg("Error: " + d.error);
     }
+  };
+
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>, setBase64Url: Function) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      setBase64Url(ev.target?.result as string);
+    };
+    reader.readAsDataURL(file);
   };
 
   const uploadEvidence = async (id: number) => {
@@ -570,6 +590,23 @@ export default function FieldOfficer() {
                 <LocationPickerMap 
                   onLocationSelect={(lat, lng) => setFarmerLocation({ lat, lng })}
                 />
+              </div>
+
+              <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 shadow-inner space-y-4">
+                <div>
+                  <label className="block text-xs uppercase font-bold text-slate-500 mb-1.5 flex justify-between">
+                    <span>Land Document (7/12) *</span>
+                    {landDoc && <span className="text-emerald-600 font-bold text-[10px]">VERIFIED</span>}
+                  </label>
+                  <input type="file" accept="image/*,.pdf" onChange={(e) => handleFileUpload(e, setLandDoc)} className="w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-xs file:font-semibold file:bg-emerald-50 file:text-emerald-700 hover:file:bg-emerald-100 cursor-pointer" required />
+                </div>
+                <div>
+                  <label className="block text-xs uppercase font-bold text-slate-500 mb-1.5 flex justify-between">
+                    <span>Farmer NOC Consent *</span>
+                    {nocDoc && <span className="text-emerald-600 font-bold text-[10px]">VERIFIED</span>}
+                  </label>
+                  <input type="file" accept="image/*,.pdf" onChange={(e) => handleFileUpload(e, setNocDoc)} className="w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-xs file:font-semibold file:bg-emerald-50 file:text-emerald-700 hover:file:bg-emerald-100 cursor-pointer" required />
+                </div>
               </div>
               
               <div className="pt-2">

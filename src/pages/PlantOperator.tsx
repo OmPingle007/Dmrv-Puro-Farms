@@ -7,6 +7,7 @@ import { useLocation } from "react-router-dom";
 type TabType = 'All' | 'OPEN' | 'PRODUCTION_COMPLETE' | 'SAMPLE_SEALED' | 'CARBON_CALCULATED' | 'DISPATCHED' | 'AUDIT_READY' | 'CORC_INELIGIBLE';
 
 export default function PlantOperator() {
+  const token = localStorage.getItem("token");
   const [batches, setBatches] = useState<any[]>([]);
   const [deliveries, setDeliveries] = useState<any[]>([]);
   const [msg, setMsg] = useState("");

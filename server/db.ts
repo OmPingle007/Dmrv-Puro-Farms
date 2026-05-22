@@ -199,6 +199,14 @@ export function initDb() {
   } catch (e: any) {
     // Ignore error if column already exists
   }
+
+  try {
+    db.prepare("ALTER TABLE farmers ADD COLUMN land_document_url TEXT").run();
+  } catch (e: any) {}
+
+  try {
+    db.prepare("ALTER TABLE farmers ADD COLUMN noc_document_url TEXT").run();
+  } catch (e: any) {}
 }
 
 export function seedDb() {

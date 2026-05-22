@@ -395,7 +395,39 @@ export default function Management() {
                 </div>
               </section>
 
-              <section>
+              <section className="mt-12">
+                <div className="flex items-center gap-4 mb-6">
+                   <span className="w-8 h-8 rounded-full bg-emerald-600 text-white flex items-center justify-center font-black text-xs">P2</span>
+                   <h3 className="font-black text-emerald-900 uppercase tracking-[0.2em] text-[10px]">Farmer Onboarding Documents</h3>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                  {traceData.deliveries.filter((d: any) => d.land_document_url || d.noc_document_url).map((d: any) => (
+                    <div key={`farmer-docs-${d.id}`} className="bg-emerald-50 border-2 border-emerald-100 rounded-[32px] p-6 shadow-sm group">
+                       <h4 className="text-xl font-black text-emerald-900 leading-none mb-1">{d.farmer_name}</h4>
+                       <p className="text-[10px] font-bold text-emerald-600/70 uppercase tracking-widest mb-6">Origin: {d.village || "Registered Farmer"}</p>
+                       <div className="grid grid-cols-2 gap-4">
+                          <div className="space-y-2">
+                            <div className="aspect-square bg-emerald-100 rounded-2xl overflow-hidden ring-1 ring-inset ring-black/5 relative shadow-inner">
+                              {d.land_document_url ? <img src={d.land_document_url} className="object-cover w-full h-full scale-105 group-hover:scale-100 transition-transform duration-700" alt="Land Doc" /> : <div className="w-full h-full flex items-center justify-center text-emerald-300">N/A</div>}
+                            </div>
+                            <p className="text-[8px] font-black text-emerald-600/70 uppercase tracking-widest text-center">Land 7/12</p>
+                          </div>
+                          <div className="space-y-2">
+                            <div className="aspect-square bg-emerald-100 rounded-2xl overflow-hidden ring-1 ring-inset ring-black/5 shadow-inner">
+                              {d.noc_document_url ? <img src={d.noc_document_url} className="object-cover w-full h-full scale-105 group-hover:scale-100 transition-transform duration-700" alt="NOC Doc" /> : <div className="w-full h-full flex items-center justify-center text-emerald-300">N/A</div>}
+                            </div>
+                            <p className="text-[8px] font-black text-emerald-600/70 uppercase tracking-widest text-center">Farmer NOC</p>
+                          </div>
+                       </div>
+                    </div>
+                  ))}
+                  {traceData.deliveries.filter((d: any) => d.land_document_url || d.noc_document_url).length === 0 && (
+                     <div className="col-span-full py-8 text-center bg-emerald-50/50 rounded-[32px] border-2 border-dashed border-emerald-100 text-emerald-600/60 font-bold uppercase tracking-widest text-xs italic">No farmer documents found for this batch's feedstock.</div>
+                  )}
+                </div>
+              </section>
+
+              <section className="mt-12">
                 <div className="flex items-center gap-4 mb-6">
                    <span className="w-8 h-8 rounded-full bg-slate-900 text-white flex items-center justify-center font-black text-xs">02</span>
                    <h3 className="font-black text-slate-900 uppercase tracking-[0.2em] text-[10px]">Puro Standard Lab CoA</h3>

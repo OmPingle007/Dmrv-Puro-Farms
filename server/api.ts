@@ -39,7 +39,7 @@ router.get("/batches/:id/trace", authenticate(["AUDITOR", "MANAGEMENT"]), (req, 
     const lotIds = JSON.parse(batch.feedstock_lot_ids || "[]");
     if (lotIds.length > 0) {
       const placeholders = lotIds.map(() => '?').join(',');
-      deliveries = db.prepare(`SELECT * FROM deliveries WHERE id IN (${placeholders})`).all(...lotIds);
+      deliveries = db.prepare(`SELECT d.*, f.land_document_url, f.noc_document_url, f.full_name as farmer_name FROM deliveries d LEFT JOIN farmers f ON d.farmer_id = f.id WHERE d.id IN (${placeholders})`).all(...lotIds);
     }
   } catch(e) {}
 
@@ -98,7 +98,7 @@ import { runCarbonEngine } from "./carbonEngine.js";
 
 // Registration (Field Officer)
 router.post("/farmers", authenticate(["FIELD_OFFICER"]), (req: any, res: any) => {
-  const { full_name, village, fpo_id, aadhaar, gps_lat, gps_lng } = req.body;
+  const { full_name, village, fpo_id, aadhaar, gps_lat, gps_lng, land_document_url, noc_document_url } = req.body;
   const aadhaarHash = crypto.createHash('sha256').update(aadhaar).digest('hex');
 
   const existing = db.prepare('SELECT id FROM farmers WHERE aadhaar_hash = ?').get(aadhaarHash);
@@ -111,8 +111,8 @@ router.post("/farmers", authenticate(["FIELD_OFFICER"]), (req: any, res: any) =>
   // Random 10% flag
   const flagged = Math.random() < 0.1 ? 1 : 0;
   
-  const result = db.prepare(`INSERT INTO farmers (full_name, village, fpo_id, aadhaar_hash, gps_lat, gps_lng, verification_status, registered_at_utc, flagged_for_call_verification) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-    .run(full_name, village, fpo_id, aadhaarHash, gps_lat, gps_lng, flagged ? 'PENDING' : 'VERIFIED', new Date().toISOString(), flagged);
+  const result = db.prepare(`INSERT INTO farmers (full_name, village, fpo_id, aadhaar_hash, gps_lat, gps_lng, verification_status, registered_at_utc, flagged_for_call_verification, land_document_url, noc_document_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .run(full_name, village, fpo_id, aadhaarHash, gps_lat, gps_lng, flagged ? 'PENDING' : 'VERIFIED', new Date().toISOString(), flagged, land_document_url || null, noc_document_url || null);
   
   res.json({ id: result.lastInsertRowid, status: flagged ? 'PENDING' : 'VERIFIED' });
 });
@@ -278,7 +278,7 @@ router.post("/batches/:id/finalize", authenticate(["PLANT_OPERATOR"]), (req, res
   }
 
   // VE-10: Combustion Uptime (simulated check)
-  const downtimeEvents = db.prepare('SELECT COUNT(*) as c FROM plc_logs WHERE batch_id_label = ? AND quality_flag = "DOWNTIME"').get(batch.batch_id_label) as any;
+  const downtimeEvents = db.prepare("SELECT COUNT(*) as c FROM plc_logs WHERE batch_id_label = ? AND quality_flag = 'DOWNTIME'").get(batch.batch_id_label) as any;
   if (downtimeEvents.c > 5) { // Threshold for 95% uptime simulation
     db.prepare('INSERT INTO flags (rule_id, record_type, record_id, batch_id_label, triggered_at_utc, status) VALUES (?, ?, ?, ?, ?, ?)')
       .run('VE-10', 'batch', id, batch.batch_id_label, new Date().toISOString(), 'OPEN');
@@ -481,7 +481,7 @@ router.post("/coa/:id/seal-check", authenticate(["MANAGEMENT", "AUDITOR"]), (req
 });
 
 router.get("/flags", authenticate(["MANAGEMENT", "AUDITOR", "PLANT_OPERATOR", "FIELD_OFFICER"]), (req, res) => {
-  let flags = db.prepare('SELECT * FROM flags WHERE status = "OPEN" ORDER BY id DESC').all() as any[];
+  let flags = db.prepare("SELECT * FROM flags WHERE status = 'OPEN' ORDER BY id DESC").all() as any[];
   
   // Filter relevant flags for non-MGMT roles if needed? 
   // User said "other profile consoles can also check their relevant flags"

@@ -513,6 +513,32 @@ export default function Auditor() {
             
             <div className="flex-1 overflow-y-auto space-y-8 pr-2">
               <div>
+                <h3 className="font-bold text-slate-700 uppercase tracking-wider text-xs border-b pb-2 mb-4">Farmer Documents</h3>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {traceData.deliveries.filter((d: any) => d.land_document_url || d.noc_document_url).map((d: any) => (
+                    <div key={`farmer-docs-${d.id}`} className="bg-slate-50 border border-slate-200 rounded-lg p-4">
+                       <div className="text-xs font-bold text-slate-500 mb-2">Farmer: {d.farmer_name}</div>
+                       <div className="flex gap-4">
+                          <div>
+                            <div className="text-[10px] uppercase text-slate-400 mb-1 text-center">Land (7/12)</div>
+                            <div className="w-24 h-24 bg-slate-200 rounded-md flex items-center justify-center overflow-hidden">
+                              {d.land_document_url ? <img src={d.land_document_url} className="object-cover w-full h-full" alt="Land Document" /> : <span className="text-slate-400 text-[10px] text-center px-1">Not Uploaded</span>}
+                            </div>
+                          </div>
+                          <div>
+                            <div className="text-[10px] uppercase text-slate-400 mb-1 text-center">NOC Consent</div>
+                            <div className="w-24 h-24 bg-slate-200 rounded-md flex items-center justify-center overflow-hidden">
+                              {d.noc_document_url ? <img src={d.noc_document_url} className="object-cover w-full h-full" alt="NOC Document" /> : <span className="text-slate-400 text-[10px] text-center px-1">Not Uploaded</span>}
+                            </div>
+                          </div>
+                       </div>
+                    </div>
+                  ))}
+                  {traceData.deliveries.filter((d: any) => d.land_document_url || d.noc_document_url).length === 0 && <div className="text-sm text-slate-400">No farmer documents attached to this batch's feedstock.</div>}
+                </div>
+              </div>
+
+              <div>
                 <h3 className="font-bold text-slate-700 uppercase tracking-wider text-xs border-b pb-2 mb-4">Feedstock Evidence</h3>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   {traceData.deliveries.map((d: any) => (
